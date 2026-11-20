@@ -126,7 +126,11 @@ def test_the_batch_engine_plays_settings_or_refuses_them_on_an_older_build():
         pytest.skip("no batch engine in this simulator build")
     import json
 
-    from yomibench.batch_play import BatchEngine
+    from yomibench import plugins
+
+    if plugins.hook("batch") is None:
+        pytest.skip("no batch plugin installed")
+    BatchEngine = plugins.hook("batch").BatchEngine
 
     engine = BatchEngine(1)
     if hasattr(sim.Batch, "settings"):

@@ -31,15 +31,20 @@ DEFAULT_PORT = 7777
 MOD_SCRIPTS = ("SteamStub.gd", "YomiServer.gd", "YomiMatch.gd", "Candidates.gd", "Candidates4.gd", "Candidates2.gd", "YomiRender.gd",
                "YomiHuman.gd", "candidate_rules_v4.json", "candidate_rules_v5.json", "candidate_rules_v6.json", "Legality.gd",
                "rules_aliases.json", "ActionSpace.gd")
-# Copied when present (none in this build: legality always comes from the game's own panel).
-OPTIONAL_MOD_SCRIPTS = ()
+# Plugins may add files to the mod's scripts or replace some (yomibench.plugins.mod_overlays); none publicly.
 STEAM_SUBDIR = Path("steamapps") / "common" / "YourOnlyMoveIsHUSTLE"
 STEAM_APP_ID = "2212330"
 # Only the player's own Steam install: a folder that Steam (or SteamCMD, signed in to the player's account) put
 # under a library's steamapps/common, next to the app's manifest. Every headless copy is made from that install,
-# on the player's own PC; nothing of the game ships with yomibench. The public build always requires it
-# (always on here).
-REQUIRE_STEAM_INSTALL = True
+# on the player's own PC; nothing of the game ships with yomibench. Always required unless this machine's local
+# config says otherwise (`[game] require_steam_install = false`, for build rigs that run archived copies).
+def _require_steam_install() -> bool:
+    from yomibench import localconfig
+
+    return localconfig.load().require_steam_install
+
+
+REQUIRE_STEAM_INSTALL = _require_steam_install()
 
 
 def steam_install_ok(game_dir: str | os.PathLike[str]) -> bool:
@@ -108,9 +113,11 @@ def default_run_dir() -> Path:
 
 
 def find_game_dir(explicit: str | os.PathLike[str] | None = None) -> Path:
-    """The install: `explicit`, $YOMIBENCH_GAME_DIR, or a Steam library that has it."""
+    """The install: `explicit`, $YOMIBENCH_GAME_DIR, the local config's `[paths] game_dir`, or a Steam library."""
+    from yomibench import localconfig
+
     tried: list[Path] = []
-    for raw in (explicit, os.environ.get("YOMIBENCH_GAME_DIR")):
+    for raw in (explicit, os.environ.get("YOMIBENCH_GAME_DIR"), localconfig.load().game_dir):
         if raw:
             p = Path(raw)
             if (p / EXE).exists():
@@ -169,11 +176,14 @@ def build_run_dir(game_dir: Path, run_dir: Path | None = None, user_dir_name: st
     scripts.mkdir(exist_ok=True)
     for name in MOD_SCRIPTS:
         shutil.copyfile(mod_dir() / name, scripts / name)
-    for name in OPTIONAL_MOD_SCRIPTS:
-        if (mod_dir() / name).exists():
-            shutil.copyfile(mod_dir() / name, scripts / name)
-        elif (scripts / name).exists():
-            (scripts / name).unlink()  # a run dir built from a fuller checkout before
+    from yomibench import plugins
+
+    overlays = plugins.mod_overlays("YomiBench")
+    for name, src in overlays.items():
+        shutil.copyfile(src, scripts / name)
+    for old in scripts.glob("*.gd"):  # a script a plugin added to an earlier build of this run dir
+        if old.name not in MOD_SCRIPTS and old.name not in overlays:
+            old.unlink()
     # Godot wants forward slashes, even on Windows.
     s = scripts.resolve().as_posix()
     (run_dir / "override.cfg").write_text(

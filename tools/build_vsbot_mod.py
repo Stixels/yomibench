@@ -54,8 +54,12 @@ def build(out_dir: Path, server: Path | None = None) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "YomiBenchVsBot.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        from yomibench import plugins
+
+        overlays = plugins.mod_overlays("YomiBenchVsBot")  # files a plugin replaces (none publicly)
         for f in FILES:
-            _entry(z, f"YomiBenchVsBot/{f.name}", f.read_bytes().replace(b"\r\n", b"\n"))
+            src = overlays.get(f.name, f) if f.parent == MOD else f
+            _entry(z, f"YomiBenchVsBot/{f.name}", src.read_bytes().replace(b"\r\n", b"\n"))
         if server is not None:
             man = server_manifest(server)
             if not any(f["path"] == EXE for f in man["files"]):

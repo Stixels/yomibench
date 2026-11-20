@@ -376,7 +376,7 @@ def set5_spec(value: Any) -> str:
 def connect(spec: str, candidate_set: int | None = None, match_settings: dict[str, Any] | None = None) -> Engine:
     """`toy`, `tcp:HOST:PORT`, `game` (start a real-game server for this engine; see
     yomibench.game), `game-pool[:N|auto]` (N headless copies of the game as one engine), `cmd:<shell-split
-    command>`, or an engine a plugin registers (plugin_engines).
+    command>`, or an engine a plugin registers (yomibench.plugins).
 
     `candidate_set` (None: the engine's default) is the candidate set every match plays: the sim
     plugin is built with it (a build without that set refuses it), and any other engine is asked for it
@@ -445,23 +445,12 @@ def _connect(spec: str, candidate_set: int | None) -> Engine:
     raise ValueError(f"unknown engine spec {spec!r}")
 
 
-# Engines beyond the public ones (toy, tcp, game, game-pool, cmd) come from plugin modules: each has
-# ENGINES = {name: factory(spec, candidate_set) -> Engine}, serving `name` and `name:...`. Modules: the optional
-# yomibench.engines_private, then $YOMIBENCH_ENGINE_PLUGINS (comma-separated module names).
-KNOWN_PLUGIN_NAMES = ("sim", "batch")  # names a build may lack: a clear error, not "unknown spec"
+# Engines beyond the public ones (toy, tcp, game, game-pool, cmd) come from plugin modules (yomibench.plugins):
+# each has ENGINES = {name: factory(spec, candidate_set) -> Engine}, serving `name` and `name:...`.
+from yomibench.plugins import KNOWN_NAMES as KNOWN_PLUGIN_NAMES  # noqa: E402  (a clear error, not "unknown spec")
 
 
 def plugin_engines() -> dict[str, Any]:
-    import importlib
-    import os
+    from yomibench import plugins
 
-    out: dict[str, Any] = {}
-    names = ["yomibench.engines_private"] + [m.strip() for m in os.environ.get("YOMIBENCH_ENGINE_PLUGINS", "").split(",")
-                                            if m.strip()]
-    for mod in names:
-        try:
-            out.update(getattr(importlib.import_module(mod), "ENGINES", {}))
-        except ModuleNotFoundError as e:
-            if e.name != mod:
-                raise
-    return out
+    return plugins.engines()

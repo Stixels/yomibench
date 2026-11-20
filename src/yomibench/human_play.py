@@ -73,13 +73,12 @@ BOTS: dict[str, tuple[str, int]] = {
     "ckpt2b-s2": ("matrix-do:{ckpt}@2", 2),
     "ckpt2b-s4": ("matrix-do:{ckpt}@4", 4),
 }
-# Where current-best / gen-N look up the best net (a best.json URL or path): $YOMIBENCH_BEST, else what a private
-# engine plugin names (DEFAULT_BEST there), else a best.json in ~/.yomibench (a one-PC training loop writes it).
-try:
-    from yomibench.engines_private import DEFAULT_BEST as _PRIVATE_BEST
-except ImportError:
-    _PRIVATE_BEST = None
-DEFAULT_BEST = _PRIVATE_BEST or str(Path.home() / ".yomibench" / "best.json")
+# Where current-best / gen-N look up the best net (a best.json URL or path): $YOMIBENCH_BEST, else the local
+# config's `[hub] best_url` (yomibench.localconfig), else a best.json in ~/.yomibench (a one-PC training loop
+# writes it).
+from yomibench import localconfig as _localconfig  # noqa: E402
+
+DEFAULT_BEST = _localconfig.load().best_url or str(Path.home() / ".yomibench" / "best.json")
 PRODUCTION_SET = 6  # the candidate set production and gates play: set 6 (set 5 with all four switches, plus the
 # expand-only toggle pairs and clicks), rules 3b8bb1b76cd8; the simulator must be a set-6 build (f9cd2f1 or later)
 GEN = re.compile(r"^gen-(\d+)$")

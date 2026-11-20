@@ -430,7 +430,7 @@ def _connect(spec, candidate_set, match_settings=None):
 def engine_characters(spec, candidate_set, candidate, match_settings=None):
     """The characters engine `spec` plays, from its hello (None if it doesn't say)."""
     if spec.split(':', 1)[0] == 'batch':
-        from yomibench.batch_play import batch_arena_engines
+        from yomibench.plugins import batch; batch_arena_engines = batch().batch_arena_engines
 
         engine = batch_arena_engines([make_bot(candidate)], candidate_set, match_settings)(spec)
     else:
@@ -468,7 +468,7 @@ def _play(args, pool, specs, characters, shard, results_path, hellos):
         opponent = make_bot(spec)
         opponent.name = label
         if any(s.split(':', 1)[0] == 'batch' for s in specs):
-            from yomibench.batch_play import batch_arena_engines
+            from yomibench.plugins import batch; batch_arena_engines = batch().batch_arena_engines
 
             batch['make'] = batch_arena_engines([candidate, opponent], args.candidate_set, args.match_settings)
         by_pairing = {'pairs_by_pairing': _by_pairing(args.pairs_by_pairing)} if args.pairs_by_pairing else {}
@@ -734,7 +734,7 @@ def seat_preflight(spec, engine_spec, candidate_set, characters, seed, decisions
     (None: standard). Returns the decisions checked."""
     bots = [make_bot(spec), make_bot(spec)]
     if engine_spec.split(':', 1)[0] == 'batch':
-        from yomibench.batch_play import batch_arena_engines
+        from yomibench.plugins import batch; batch_arena_engines = batch().batch_arena_engines
 
         engine = batch_arena_engines(bots, candidate_set, match_settings)(engine_spec)
     else:
@@ -1048,7 +1048,7 @@ def main(argv=None):
         results = [_game(d) for d in games]
         try:  # the engine's hello, for the ledger row
             if specs[0].split(':', 1)[0] == 'batch':
-                from yomibench.batch_play import batch_arena_engines
+                from yomibench.plugins import batch; batch_arena_engines = batch().batch_arena_engines
 
                 e = batch_arena_engines([make_bot(args.candidate)], args.candidate_set, args.match_settings)(specs[0])
             else:

@@ -75,7 +75,11 @@ def test_set4_records_rebuild_expanded_picks_and_match_the_unrecorded_game(tmp_p
     sim = pytest.importorskip("yomisim")
     if not hasattr(sim, "Batch"):
         pytest.skip("needs the simulator plugin's batch engine")
-    from yomibench.batch_play import BatchEngine
+    from yomibench import plugins
+
+    if plugins.hook("batch") is None:
+        pytest.skip("no batch plugin installed")
+    BatchEngine = plugins.hook("batch").BatchEngine
 
     try:
         BatchEngine(1, candidate_set=4, hp_only=True)
