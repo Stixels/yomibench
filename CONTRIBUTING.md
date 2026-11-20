@@ -14,7 +14,7 @@ Thanks for helping. Bug fixes, faster code, better bots and clearer docs are all
 ## Before you open a PR
 
 ```
-uv sync --extra test
+uv sync --extra train --extra test
 uv run pytest
 ```
 
