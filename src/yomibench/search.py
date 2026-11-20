@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
+
+from yomibench import phases
 
 
 def _load_native():
@@ -61,6 +64,7 @@ def solve_both(payoff: list[list[float]], iterations: int) -> tuple[list[float],
     the seats (solving -payoff transposed) returns exactly the swapped answer, bit for bit.
     Exploitability is convex, so the average is no more exploitable than the worse of the two runs
     (double_oracle checks the actual exploitability against its 1e-3 tolerance)."""
+    t = time.perf_counter()
     rows, cols = len(payoff), len(payoff[0])
     half = (iterations + 1) // 2
     r1, c1 = _alternating(payoff, half)
@@ -68,6 +72,7 @@ def solve_both(payoff: list[list[float]], iterations: int) -> tuple[list[float],
     strategy = [(a + b) / 2 for a, b in zip(r1, r2)]
     col = [(a + b) / 2 for a, b in zip(c1, c2)]
     value = min(sum(strategy[i] * payoff[i][j] for i in range(rows)) for j in range(cols))
+    phases.add("solve", time.perf_counter() - t)  # timing only (the ledger's solve_ms)
     return strategy, col, value
 
 

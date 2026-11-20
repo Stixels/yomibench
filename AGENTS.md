@@ -29,7 +29,8 @@ uv sync --extra train --extra test
 
 Extras: `net` (numpy) is enough to pack and check a submission; `train` (numpy and torch) is needed to train and for
 the full test suite; `test` adds pytest. In a clone synced with only some extras, `uv run --extra net ...` adds numpy
-for that command. `uv sync` writes a `uv.lock`; don't commit it.
+for that command. `uv.lock` is committed: when you change dependencies in `pyproject.toml`, run `uv lock` and
+commit the updated lock with the change.
 
 The native solver (`native/yomisolve`, needs a Rust toolchain) is optional and only a speedup; see its README.
 

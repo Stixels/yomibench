@@ -210,13 +210,12 @@ def test_run_dir_gets_override_cfg_and_our_scripts_only(tmp_path):
 
     install = tmp_path / "install"
     install.mkdir()
-    for name in (game.EXE, game.PACK, "tbfg.dll", "steam_api64.dll"):
+    libs = ["libtbfg.so", "libsteam_api.so"] if game.LINUX else ["tbfg.dll", "steam_api64.dll"]
+    for name in (game.EXE, game.PACK, *libs):
         (install / name).write_bytes(b"x")
     (install / "mods").mkdir()  # not copied
     run = game.build_run_dir(game.find_game_dir(install), tmp_path / "run")
-    assert sorted(p.name for p in run.iterdir()) == sorted(
-        [game.EXE, game.PACK, "tbfg.dll", "steam_api64.dll", "override.cfg", "yomibench"]
-    )
+    assert sorted(p.name for p in run.iterdir()) == sorted([game.EXE, game.PACK, *libs, "override.cfg", "yomibench"])
     cfg = (run / "override.cfg").read_text()
     assert 'SteamHustle="*' in cfg and "/yomibench/SteamStub.gd" in cfg and "/yomibench/YomiServer.gd" in cfg
     assert sorted(p.name for p in (run / "yomibench").iterdir()) == sorted(game.MOD_SCRIPTS + game.OPTIONAL_MOD_SCRIPTS)

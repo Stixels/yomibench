@@ -1,10 +1,7 @@
 # Head-to-head matches and the ladder
 
 > A local tool for running your own seasons between bundles on your PC. The public Arena uses the same
-> bundles, under its own pinned settings (`arena/spec.json`, [Submit](SUBMIT.md)).
-
-> A local tool for running your own seasons between bundles on your PC. The public Arena uses the same
-> bundles, under its own pinned settings (`arena/spec.json`, [Submit](SUBMIT.md)).
+> bundles, under its own pinned settings (`arena/spec.json`, [Submit](public/SUBMIT.md)).
 
 How people's trained models play each other fairly. Each side hands over a **bundle** (frozen nets,
 no code), and a **ladder season** plays every entrant against every other one in each mode and

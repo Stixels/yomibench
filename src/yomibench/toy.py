@@ -197,6 +197,18 @@ class ToyEngine:
                 self.state = resolve(self.state, self._picks(self.state, msg["actions"]))
                 self.handles.clear()
                 return self._obs(self.state)
+            if cmd == "fast_forward":  # replay recorded picks (candidate dicts) from the current state
+                for pair in msg["inputs"]:
+                    picks = []
+                    for seat, want in enumerate(pair):
+                        key = (want["action"], want.get("data"), want.get("extra"))
+                        found = [c for c in candidates(self.state, seat) if (c["action"], c["data"], c["extra"]) == key]
+                        if not found:
+                            return _err("bad_request", f"seat {seat}: no candidate {key!r}")
+                        picks.append(found[0])
+                    self.state = resolve(self.state, (picks[0], picks[1]))
+                self.handles.clear()
+                return self._obs(self.state)
             if cmd == "preview":
                 if is_done(self.state):
                     return _err("match_over", "the match has ended")

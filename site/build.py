@@ -57,6 +57,7 @@ ICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0
 # Credits, in the user's own words and names (README.public.md and README.md carry the same text).
 CREDITS = ('<section class="credits"><h2>Credits</h2>'
            '<p><b>Ivy Sly</b>, developer of <i>Your Only Move Is HUSTLE</i>, for permission to build this project, including a Rust rewrite of the engine.</p>'
+           '<p><b>jackmaiorino</b>, for <a href="https://github.com/jackmaiorino/spellbench">spellbench</a>, the Magic: The Gathering bot arena yomibench is a sibling of.</p>'
            '<p><b>TRUEcoiness, MoreBlasta, glopsy</b>, YOMI Hustle players, for direction and documentation.</p></section>')
 FOOT_CREDITS = 'Thanks to Ivy Sly, developer of Your Only Move Is HUSTLE, and to TRUEcoiness, MoreBlasta and glopsy.'
 
@@ -587,8 +588,9 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
     spec_line = ""
     if aspec:
         arena_games = sum(r.get("games") or 0 for r in rows)
-        spec_line = (f'<p class="specline"><span>Rated on game {esc(aspec["game"]["version"])} (Steam build '
-                     f'{esc(aspec["game"]["steam_build_id"])})</span><span>harness {esc(aspec["harness"]["version"])}'
+        spec_line = (f'<p class="specline"><span>Played on our simulator, as game '
+                     f'{esc(aspec["game"]["version"])} (Steam build {esc(aspec["game"]["steam_build_id"])})</span>'
+                     f'<span>harness {esc(aspec["harness"]["version"])}'
                      f'</span><span>candidate set {aspec["candidate_set"]}</span><span>spec <code>'
                      f'{spec_hash(aspec)}</code></span><span>{arena_games} Arena games</span></p>')
     chars = character_results(rows, rels)
@@ -634,9 +636,12 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
                 f"round-robin of the current era is under way ({sum(r['games'] for r in rows)} games so far) and takes "
                 f"over once every bot has {ARENA_ONLY_GAMES}. {pooled}")
     body = (f'<header class="pagehead"><p class="eyebrow">Your Only Move Is HUSTLE · bot arena</p>'
-            f'<h1>The Arena</h1><p class="lead">The Arena rates bots under one fixed set of ranked settings, with the '
-            f'same thinking budget per move for every bot. HustleBot, our own bot, is the house entry: each of its '
-            f'generations is listed as HustleBot gN. Every video is a game replayed in the real game.</p></header>'
+            f'<h1>The Arena</h1><p class="lead">Phase 1 is a value-net division: every entry\'s nets play inside the '
+            f'same search, ours, under one fixed set of ranked settings and the same thinking budget per move, so a '
+            f'rating measures the nets, not a whole bot. HustleBot, our own bot, is the house entry: each of its '
+            f'generations is listed as HustleBot gN.</p><p class="small">Rated games run on our private simulator of '
+            f'the game, checked against the real game; every video is the game replayed in the real '
+            f'game.</p></header>'
             f'{hero}<section><div class="sechead"><h2>{board_title}</h2><span class="small">Bradley–Terry rating with '
             f'an approximate 95% interval · g{rels[0]["generation"] if rels else "?"} = 0</span></div>'
             f'<p class="small note">{esc(note)}</p>'
@@ -895,7 +900,7 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
             top = (f'<div class="callout"><div><b>The checks are live; rated matches open soon.</b><span>Submit now and '
                    f'the checks tell you whether your bot is ready. Valid bots are played once rated matches start.'
                    f'</span></div><a class="button" href="{FORM}">Open the submission form</a></div>'
-                   '<div class="tiles">' + tile("Data only", "Phase 1", "nets and settings, never code")
+                   '<div class="tiles">' + tile("Data only", "Phase 1", "value nets in our search, never code")
                    + tile("Same budget", "Every bot", "fixed ranked settings")
                    + tile("Automatic", "Checks", "size, contents, a test position") + "</div>")
         if path == "/get-started/setup/":

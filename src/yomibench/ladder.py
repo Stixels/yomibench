@@ -108,7 +108,11 @@ def _net_info(path: Path, kind: str) -> dict[str, Any]:
     except LadderError:
         raise
     except Exception as e:
-        raise LadderError(f"{kind} doesn't load: {e}") from e
+        hint = ""
+        if "feature version" in str(e):  # a net from another trainer, or an old one: point at the contract
+            hint = ("; nets must be trained on yomibench's own features, see 'What a compatible net is' in "
+                    "docs/SUBMIT.md")
+        raise LadderError(f"{kind} doesn't load: {e}{hint}") from e
 
 
 def pack(name: str, owner: str, value: Path | None, policy: Path | None, out: Path, notes: str = "") -> dict[str, Any]:

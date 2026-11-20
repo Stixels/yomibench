@@ -133,3 +133,11 @@ def test_a_season_refuses_another_engine(tmp_path):
 def test_season_seed_from_both_secrets():
     assert ladder.season_seed("a", "b") == ladder.season_seed("b", "a") != ladder.season_seed("a", "c")
     assert len(ladder.commitment("a")) == 64
+
+
+def test_a_net_from_another_trainer_is_refused_with_a_pointer_to_the_contract(tmp_path):
+    np = pytest.importorskip("numpy")
+    foreign = tmp_path / "foreign.npz"  # a net whose meta doesn't name one of our features versions
+    np.savez(foreign, w1=np.zeros((3, 2), np.float32), meta=np.array(json.dumps({"vocab": {}})))
+    with pytest.raises(ladder.LadderError, match=r"feature version None.*'What a compatible net is' in docs/SUBMIT\.md"):
+        ladder.pack("foreign-v1", "them", foreign, None, tmp_path / "foreign.zip")

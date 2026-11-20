@@ -48,22 +48,53 @@ def _is_mode(path: tuple, values: list[Any]) -> bool:
                               for v in values)
 
 
-def option_keys(cands: list[Candidate]) -> list[str]:
-    """Each candidate's option within its move: its values of the mode widgets (`_is_mode`, judged over
-    the move's variants in this list) that vary among those variants, in its data and its extra, as a
-    string. Candidates of one move that differ only in aims, directions or sliders share an option."""
+def _frozen(value: Any) -> Any:
+    """A hashable stand-in for a JSON value (string keys), equal to another's exactly when their
+    `json.dumps(..., sort_keys=True)` strings are equal, without serialising: scalars carry their type
+    (so True, 1 and 1.0 stay apart, as JSON writes them), floats compare by their repr (JSON's spelling:
+    -0.0 and 0.0 differ, NaN equals NaN), lists become tuples and dicts their items sorted by key."""
+    t = type(value)
+    if t is dict:
+        return (dict, tuple((k, _frozen(value[k])) for k in sorted(value)))
+    if t is list or t is tuple:
+        return (list, tuple(map(_frozen, value)))
+    if t is float:
+        return (float, repr(value))
+    return (t, value)
+
+
+def _option_tuples(cands: list[Candidate]) -> tuple[list[Any], list[list[tuple]]]:
+    """`option_keys` as hashable keys (each candidate's frozen mode-widget values, `_frozen`): equal
+    exactly when the string keys are, without serialising anything. Also each candidate's mode
+    paths and values ((path, value) pairs, the string key's content), so a key's string can be written
+    for the few callers that need it (`_option_string`)."""
     by_move: dict[str, list[int]] = {}
     for i, c in enumerate(cands):
         by_move.setdefault(c.action, []).append(i)
-    out = [""] * len(cands)
+    keys: list[Any] = [()] * len(cands)
+    parts: list[list[tuple]] = [[] for _ in cands]
     for idx in by_move.values():
         leaves = [dict(_leaves(cands[i].data, ("data",)) + _leaves(cands[i].extra, ("extra",))) for i in idx]
         paths = sorted({p for lv in leaves for p in lv}, key=str)
         mode = [p for p in paths if _is_mode(p[1:], [lv.get(p) for lv in leaves])
-                and len({json.dumps(lv.get(p), sort_keys=True) for lv in leaves}) > 1]
+                and len({_frozen(lv.get(p)) for lv in leaves}) > 1]
         for i, lv in zip(idx, leaves):
-            out[i] = json.dumps([[list(p), lv.get(p)] for p in mode], sort_keys=True)
-    return out
+            parts[i] = [(p, lv.get(p)) for p in mode]
+            keys[i] = tuple((p, _frozen(v)) for p, v in parts[i])
+    return keys, parts
+
+
+def _option_string(part: list[tuple]) -> str:
+    """One candidate's `option_keys` string from its `_option_tuples` parts."""
+    return json.dumps([[list(p), v] for p, v in part], sort_keys=True)
+
+
+def option_keys(cands: list[Candidate]) -> list[str]:
+    """Each candidate's option within its move: its values of the mode widgets (`_is_mode`, judged over
+    the move's variants in this list) that vary among those variants, in its data and its extra, as a
+    string. Candidates of one move that differ only in aims, directions or sliders share an option.
+    (`cap_candidates` groups by `_option_tuples`, the same equality without serialising.)"""
+    return [_option_string(part) for part in _option_tuples(cands)[1]]
 
 
 def cap_candidates(cands: Iterable[Candidate], cap: int, policy: str = "list", salt: str = "") -> list[Candidate]:
@@ -114,7 +145,7 @@ def cap_candidates(cands: Iterable[Candidate], cap: int, policy: str = "list", s
         if policy == "options-shuffle":
             phases.append(_shuffled_options(cands, m, salt))
         elif policy in ("options-first", "options-rotate"):
-            keys = option_keys([cands[i] for i in m])
+            keys = _option_tuples([cands[i] for i in m])[0]
             heads = [i for k, i in enumerate(m) if keys[k] not in keys[:k]]
             if policy == "options-rotate":
                 r = _h(salt, cands[m[0]].action) % len(heads)
@@ -143,12 +174,15 @@ def _shuffled_options(cands: list[Candidate], m: list[int], salt: str) -> tuple[
     """options-shuffle's phases for one move (its candidate indices `m`): the options in list order of
     their first variant, each represented by the first of its variants in a seeded shuffle; then the
     rest, one per option per round in that order, each option's in its shuffled order."""
-    keys = option_keys([cands[i] for i in m])
-    groups: dict[str, list[int]] = {}
-    for k, i in zip(keys, m):
+    keys, parts = _option_tuples([cands[i] for i in m])
+    groups: dict[Any, list[int]] = {}
+    first: dict[Any, int] = {}  # each option's first variant (position in m): its key's string is the hash's
+    for pos, (k, i) in enumerate(zip(keys, m)):
         groups.setdefault(k, []).append(i)
+        first.setdefault(k, pos)
     action = cands[m[0]].action
-    order = [sorted(g, key=lambda i, k=k: _h(salt, action, k, json.dumps([cands[i].data, cands[i].extra], sort_keys=True)))
+    order = [sorted(g, key=lambda i, k=_option_string(parts[first[k]]):
+                    _h(salt, action, k, json.dumps([cands[i].data, cands[i].extra], sort_keys=True)))
              for k, g in groups.items()]
     rest = [g[r] for r in range(1, max(map(len, order))) for g in order if r < len(g)]
     return [g[0] for g in order], rest

@@ -3,11 +3,20 @@
 > **Status: the checks are live, rated matches open soon.** You can submit now and the checks will tell you whether
 > your bot is ready. Valid bots are played once rated matches start, and their results then appear on the site.
 
-The Arena rates bots against each other under one fixed set of ranked settings, and every bot gets the same
-thinking budget per move. In phase 1 you submit **data only**: your trained nets and a few search settings for our
-existing search. Nothing you send is ever run as code.
+Phase 1 of the Arena is a **value-net division**. You submit **data only**: your trained nets and a few search
+settings. Nothing you send is ever run as code. Every entry plays with the same search, ours (the one HustleBot
+uses), under one fixed set of ranked settings and the same thinking budget per move. So a rating measures your nets
+inside our search, not a whole bot: a search of your own doesn't take part. Whole bots get their own division in
+phase 2 (see the end of this page).
 
 **[Open the submission form](https://github.com/Stixels/yomibench/issues/new?template=submit-bot.yml)**
+
+## Where rated games run
+
+Rated games run on our private simulator, a Rust rewrite of the game's engine made with Ivy Sly's permission and
+checked against the real game, so a game plays out the same on both. Every Arena video is the game replayed in the
+real game. You can't run the simulator yourself: the public harness trains and tests on headless copies of your own
+Steam install (see [Training](TRAINING.md)), which are slower but play the same game.
 
 ## What you send
 
@@ -53,6 +62,31 @@ Both need a policy net in the bundle:
 
 Leave `settings` empty to play the full search with your value net, like HustleBot, the house bot.
 
+## What a compatible net is
+
+The search calls your value net on positions it builds, so the net must read positions the way our encoder writes
+them. A net trained with the public harness (`tools/train_loop.py`, see [Training](TRAINING.md)) meets all of
+this; one from another trainer must match it exactly, and can't be converted after the fact.
+
+- **The file:** a `.npz` of arrays plus a `meta` entry, a JSON string with `features` (the features version, 3
+  today), `vocab` (name to id for each category) and `raw_defaults` (each character's starting values). It loads
+  with `allow_pickle=False`.
+- **The inputs:** features version 3, from `src/yomibench/features.py`. Each position is encoded from one seat's
+  view, mirrored so the opponent is always on the positive side: 355 numbers (their names, in order, are
+  `features.NUMERIC_NAMES`) and 22 names (fighter state, stance and character for each side, then the kind and state
+  of up to 8 objects). The net standardizes the numbers with its own `mean` and `std` arrays, and turns each name
+  into its `vocab` id, looked up in an embedding table per category (`emb_state`, `emb_stance`, `emb_char`,
+  `emb_kind`, `emb_ostate`; row 0 is "unknown").
+- **The body:** two or more ReLU hidden layers. With two, the keys are `w1 b1 w2 b2` and the output `w3 b3`; deeper
+  nets add `wh3 bh3 ...` and end in `w_out b_out`. The output is one number through `tanh`.
+- **The score:** the search scores a position from both seats' views and takes half the difference, so one side's
+  value is exactly minus the other's. Train for "who wins from this seat's view", in [-1, 1].
+- **Characters:** the Arena plays all five. A character the net never saw still loads and plays, as an unknown
+  fighter whose own fields read as neutral, but it will play that matchup blind.
+
+`src/yomibench/valuenet.py` (`ValueNet.load`, `forward`) is the reference: if it loads your file and scores a
+position, the search can use it. The checks below do exactly that.
+
 ## Check it on your PC first
 
 ```
@@ -91,7 +125,10 @@ engine build, the mod, the play code, the candidate set and its rules, the net f
 settings. Every result records the versions it actually ran on, and the leaderboard says which spec it rates. When
 the spec changes, a new rating era starts.
 
+A new features version or candidate set means nets trained on the old one can't enter the new era. We announce
+those changes on the site at least 14 days ahead, so you have time to retrain.
+
 ## Later: phase 2
 
-Bots with their own code (a custom search, not just nets) will come later, run in a sandbox. Phase 1 is nets and
-settings only.
+Bots with their own code (a custom search, not just nets) will come later, run in a sandbox, as a separate division
+with its own leaderboard: phase 1 ratings and whole-bot ratings are never mixed. Phase 1 is nets and settings only.

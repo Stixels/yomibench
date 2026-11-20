@@ -66,6 +66,7 @@ More: [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
 
 - **Ivy Sly**, developer of *Your Only Move Is HUSTLE*, for permission to build this project, including a Rust rewrite of the engine.
 - **TRUEcoiness, MoreBlasta, glopsy**, YOMI Hustle players, for direction and documentation.
+- **jackmaiorino**, for [spellbench](https://github.com/jackmaiorino/spellbench), the Magic: The Gathering bot arena yomibench is a sibling of.
 
 ## Credits and license
 

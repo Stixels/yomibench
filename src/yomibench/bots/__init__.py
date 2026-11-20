@@ -95,6 +95,9 @@ class MatrixBot:
         if policy is not None and search != "oracle":
             raise ValueError("policy pruning needs search='oracle'")
         self.policy = policy  # prototype: prune base candidates to a policy net's top K (None: off)
+        # "batched" (`make_bot`'s @value_forward=batched): the Batch engine scores this bot's two views in one
+        # value-net forward (`BatchValue(batched_forward=True)`; not bit-identical). None: two forwards.
+        self.value_forward: str | None = None
         self.name = "matrix" if search == "full" else "matrix-do"
 
     def _key(self, seat: int | None = None) -> tuple:
@@ -110,6 +113,9 @@ class MatrixBot:
         """Both seats' strategies and p1's guaranteed value for this turn. Previewed next states
         collect in engine.turn_cache["previewed"] as {(i, j): state}. `seat` is the deciding seat,
         which only an own-scope policy pruning reads (it needs one)."""
+        if self.value_forward and not getattr(self.value, "batched_forward", False):
+            raise ValueError(f"{self.name}: @value_forward={self.value_forward} needs --engine batch (the Batch "
+                             f"engine's BatchValue does the batched forward), not {type(engine).__name__}")
         key = self._key(seat)
         cached = engine.turn_cache.get(key)
         if cached is not None:
@@ -318,6 +324,9 @@ class MatrixBot:
                 "solver": SOLVER,
                 "candidate_set": self.candidate_set,
                 "value": getattr(self.value, "__name__", repr(self.value)),
+                # Only with selfplay --batched-net-forward or @value_forward=batched (not bit-identical to the default).
+                **({"value_forward": "batched"} if getattr(self.value, "batched_forward", False)
+                   or self.value_forward == "batched" else {}),
                 **({"playout_cap": list(self.playout_cap)} if self.playout_cap else {}),
                 **({"policy": self.policy.config()} if self.policy else {})}
 
@@ -807,12 +816,15 @@ def make_bot(spec: str) -> Bot:
     rule; `matrix-do@cheap=0.75:32:options-first`); the bot is named with it. A `@prune=K:R:A[:SCOPE]:POLICY.npz` suffix
     (`matrix-do@prune=16:4:0.05:own:policy.npz`; prototype) prunes with a policy net (`PolicyPrune`:
     top K, R random, audit share A, scope `own` (default) or `both`); everything after the scope is
-    the model path, so it may hold colons. `policy:POLICY.npz` is the no-search bot (`PolicyBot`),
-    sampling the policy net's softmax; `@temp=T` sets its temperature, and `@N` works as above."""
+    the model path, so it may hold colons. A `@value_forward=batched` suffix (matrix bots with a model;
+    `--engine batch` only) scores this bot's two views in one value-net forward, as selfplay
+    --batched-net-forward does: not bit-identical to the default, so it can be gated on one seat.
+    `policy:POLICY.npz` is the no-search bot (`PolicyBot`), sampling the policy net's softmax;
+    `@temp=T` sets its temperature, and `@N` works as above."""
     if spec.startswith("policy:"):
         return _policy_bot(spec[len("policy:"):])
     spec, sep, rest = spec.partition("@")
-    cset, cheap, prune = "", None, None
+    cset, cheap, prune, forward = "", None, None, None
     for opt in rest.split("@") if sep else []:
         if opt.startswith("prune="):
             parts = opt[len("prune="):].split(":", 3)
@@ -835,6 +847,10 @@ def make_bot(spec: str) -> Bot:
                 raise ValueError(f"@cheap=P:N:POLICY takes a policy in {CAP_POLICIES}: {opt!r}")
             if policy and policy != "list":
                 cheap += (policy,)
+        elif opt.startswith("value_forward="):
+            forward = opt[len("value_forward="):]
+            if forward != "batched":
+                raise ValueError(f"@value_forward takes only 'batched': {opt!r}")
         else:
             cset = opt
     name, _, model = spec.partition(":")
@@ -856,6 +872,11 @@ def make_bot(spec: str) -> Bot:
             raise ValueError(f"only matrix bots take @cheap: {spec!r}")
         bot.playout_cap = cheap
         bot.name = f"{bot.name}@cheap={cheap[0]:g}:{cheap[1]}" + "".join(f":{x}" for x in cheap[2:])
+    if forward:
+        if not model:
+            raise ValueError(f"only matrix bots with a model take @value_forward: {spec!r}")
+        bot.value_forward = forward  # type: ignore[union-attr]
+        bot.name = f"{bot.name}@value_forward={forward}"
     if prune:
         if not isinstance(bot, MatrixBot) or bot.mode != "oracle":
             raise ValueError(f"only matrix-do bots take @prune: {spec!r}")

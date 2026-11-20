@@ -696,6 +696,31 @@ def merge_selfplay_stats(parts: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def _phase_metrics(stats: dict[str, Any], div: Any) -> dict[str, Any]:
+    """Per-phase timings of a search turn (docs: sim-time-budget's ledger proposal), each in ms per turn:
+    `preview_sim_ms` (time in the engine's preview calls), `net_ms` (value-net scoring: input assembly and
+    forward), `solve_ms` (the matrix-game solves, search.solve_both), `expand_ms` (candidate expansion),
+    `search_other_ms` (the rest of the search turn: search bookkeeping and Python glue), all per searched
+    turn; `step_ms` (engine step and observe) and `record_ms` (record encoding, compression and writing)
+    per decision. `oracle_loop_ms_per_turn` is `solver_ms_per_turn` under the name that says what it
+    times (the whole search turn minus the previews, not the solve). Stats without the phase counters
+    (from before them, or engines that don't time them) leave these out."""
+    if "net_ms" not in stats:
+        return {}
+    searched, decisions = stats["searched"], stats.get("decisions", 0)
+    phase = {k: stats.get(k, 0.0) for k in ("preview_ms", "net_ms", "solve_ms", "expand_ms")}
+    return {
+        "preview_sim_ms": div(phase["preview_ms"], searched),
+        "net_ms": div(phase["net_ms"], searched),
+        "solve_ms": div(phase["solve_ms"], searched),
+        "expand_ms": div(phase["expand_ms"], searched),
+        "search_other_ms": div(stats["search_ms"] - sum(phase.values()), searched),
+        "step_ms": div(stats.get("step_ms", 0.0), decisions),
+        "record_ms": div(stats.get("record_ms", 0.0), decisions),
+        "oracle_loop_ms_per_turn": div(stats["search_ms"] - stats["preview_ms"], searched),
+    }
+
+
 def selfplay_metrics(stats: dict[str, Any], wall_seconds: float, engines: int, procs: int,
                      interrupted: bool = False) -> dict[str, Any]:
     written, searched = stats["written"], stats["searched"]
@@ -713,6 +738,7 @@ def selfplay_metrics(stats: dict[str, Any], wall_seconds: float, engines: int, p
         "preview_us_mean": div(stats["preview_ms"], stats["preview_pairs"], 1000.0),
         "solver_ms_per_turn": div(stats["search_ms"] - stats["preview_ms"], searched),
         "search_ms_per_turn": div(stats["search_ms"], searched),
+        **_phase_metrics(stats, div),
         "game_seconds_mean": div(stats["game_seconds"], written),
         # Mean compressed size of the finished game files, overall and by kind (slim or full previews).
         "bytes_per_game": div(stats.get("bytes_slim", 0) + stats.get("bytes_full", 0),
@@ -738,6 +764,9 @@ def selfplay_metrics(stats: dict[str, Any], wall_seconds: float, engines: int, p
                 "fallback_turns": c.get("fallback_turns", 0), "max_preview_pairs": c.get("max_preview_pairs", 0)}
             for m, c in sorted(stats.get("by_matchup", {}).items())},
         "engines": engines, "procs": procs, "interrupted": interrupted, **capped,
+        # Sampled-state starts (selfplay --sampled-starts): sampled slots, games started so, and the
+        # slots played from the opening instead, by reason (yomibench.sampled_starts.SKIPS).
+        **({"sampled_starts": dict(stats["sampled_starts"])} if stats.get("sampled_starts") else {}),
     }
 
 
