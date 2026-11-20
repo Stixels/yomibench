@@ -13,9 +13,11 @@ extends Node
 # - At every decision (both turn branches opened, game paused) the mod sends the inputs both
 #   fighters were given last turn and a compact snapshot of the real state, and gets the bot's pick
 #   for P2, which it submits with P2's own ActionButtons.on_action_submitted: the call the panel's
-#   Select button makes, so the game treats it as a normal selection. P2's panel stays hidden and
-#   takes no input, and both Undo buttons are hidden (an undo would rewind the real match only), as
-#   are the in-match replay keys (see _input).
+#   Select button makes, so the game treats it as a normal selection. P2's panel is shown as an
+#   online opponent's is, greyed and clickable (Select and keyboard lock-in do nothing): its clicks
+#   only set P2's ghost, which starts on Continue, and never reach the bot's move; the bot's pick
+#   never touches the panel or the ghost. Both Undo buttons are hidden (an undo would rewind the real match only), as are
+#   the in-match replay keys (see _input).
 # - Inputs are read from each fighter right after on_action_selected (its queued action, data and
 #   extra, as the replay records them), so P1's are exactly what the UI sent.
 # - At the end it sends the final snapshot and the winner; the server writes the result.
@@ -23,6 +25,17 @@ extends Node
 #   the bot's pick is still pending, the mod sends a one-way {"type": "locked_in", "turn": N} (no
 #   reply, no callback queued): THAT P1 locked in, never what. P1's input still reaches the server
 #   only with the next decision. The bottom bar shows how deep the bot got (the reply's `depth`).
+# - "Turn timer" (panel; default on for a preset with a timer, i.e. ranked, as the game plays it, off for
+#   standard): the game's own turn timer, from the match's settings (timer_mode, turn_time, turn_min_length,
+#   increment_*). Online ("host"/"client") the game runs it itself. Singleplayer the game never starts it, so
+#   "single" runs the game's own P1/P2 turn timers here the way the game runs them online (UILayer's
+#   on_player_actionable and _on_turn_timer_timeout): the same lengths, the same top-ups, and on expiry the
+#   same outcome: P1's panel locks in what it holds (ActionButtons.timeout); the bot, if its answer is late,
+#   holds (Continue). The bot answers before the timer: the server's deadline, plus a backstop here that
+#   reads the bot's real clock (the game's P2 timer) and sends a one-way `deadline` 1.5 s before it ends.
+#   With the timer on, "Bot thinks until you lock in" defaults on too: the bot uses its clock, deepening its
+#   search until you lock in or its deadline (whichever is first), then locks in.
+#   Off: timer_mode "none" (the standard settings' clock).
 #
 # Options: --yomi-human=PORT (required), --yomi-human-host=ADDR (default 127.0.0.1; tests in Docker),
 # --yomi-human-p1=CHAR / --yomi-human-p2=CHAR (the panel's defaults), --yomi-human-autoplay (headless
@@ -41,7 +54,7 @@ extends Node
 # `link` is the node that carries messages between the two (VsBot.gd / MpClient.gd).
 
 const PROTOCOL = 1
-const VERSION = "6"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides
+const VERSION = "7"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single
 # The characters the panel offers until the server's hello names the ones its sim plays.
 var characters = ["Ninja", "Cowboy", "Wizard", "Mutant", "Robot"]
 
@@ -51,6 +64,11 @@ var autoplay = false
 var peer = null
 var connected = false
 var retry_at = 0
+var net_since = 0        # client: when it first tried the bot server (0: not yet)
+var listening_since = 0  # client: when the server's status file first said "listening"
+var gave_up = false
+var wait_title = ""      # host: what the panel says while the bot isn't up yet (VsBot.gd sets it)
+var wait_text = ""
 var inbuf = ""
 var callbacks = []       # reply handlers, in request order
 var server = {}          # the server's hello
@@ -60,6 +78,7 @@ var main = null
 var game = null
 var p1_panel = null
 var p2_panel = null
+var p2_extra = null      # single: P2's panel's untouched extra at the decision (a pick without extra)
 var phase = "boot"       # boot, connecting, idle, starting, playing, ended
 var match_ = {}
 var turn = 0
@@ -96,8 +115,16 @@ var think_on = false
 var pending_turn = -1    # the decision whose pick is pending
 var decision_msec = 0
 var deadline_sent = false
-var turn_ms = 0          # a per-turn ("default") timer's length; the server follows chess/increment banks itself
 var depth_text = ""
+# The turn timer (see the top). The game's own clock settings: the server and the game read the same keys.
+const TIMER_KEYS = ["timer_mode", "turn_time", "turn_min_length", "increment_starting_time", "increment_per_turn",
+	"increment_max_time"]
+const BACKSTOP_S = 1.5   # the bot's answer is asked for this long before its clock (the game's P2 timer) ends
+var timer_box = null
+var lobby_timer = {}     # the game's lobby timer settings (the settings panel's defaults), before standard turns it off
+var single_clock = false # single: this match runs the game's turn timers here (the game runs them only online)
+var submitted_for = -1   # the decision whose pick this game submitted for P2 (another: P2's clock ran out first)
+var p2_timeouts = 0      # this match: turns P2 was locked in by its clock running out, not by the bot's answer
 
 
 signal leave_requested  # hosted: the player pressed "Back to main menu"
@@ -180,6 +207,10 @@ func _standard_settings():
 	p.queue_free()
 	if s.empty():
 		return s
+	lobby_timer = {}
+	for k in TIMER_KEYS:
+		if s.has(k):
+			lobby_timer[k] = s[k]
 	s["sadness_enabled"] = true
 	s["timer_mode"] = "none"
 	s["p2_dummy"] = false
@@ -203,11 +234,57 @@ func _process(_delta):
 	_update_status()
 
 
+# The bot server's progress file (packaging/windows/yomibench_app.py write_status): {"phase", "detail", "pid",
+# "time"} in %USERPROFILE%\.yomibench\bot-server.status, or {} if there is none (yet) or it can't be read.
+static func server_status():
+	var f = File.new()
+	var path = server_file("bot-server.status")
+	if path == "" or not f.file_exists(path) or f.open(path, File.READ) != OK:
+		return {}
+	var r = JSON.parse(f.get_as_text())
+	f.close()
+	if r.error != OK or typeof(r.result) != TYPE_DICTIONARY or not r.result.has("phase"):
+		return {}
+	return r.result
+
+
+# A file in the bot server's folder in the user's profile (its log and status), "" if the profile isn't known.
+static func server_file(name):
+	var home = OS.get_environment("USERPROFILE")
+	if home == "":
+		home = OS.get_environment("HOME")
+	return "" if home == "" else home.replace("\\", "/").plus_file(".yomibench").plus_file(name)
+
+
+# Client: the bot server never answered. Gives up 90 s after the server said it was listening (its first run can
+# spend a minute or more building its game data first), or after 7 minutes in any case, and tells the host.
+const CLIENT_AFTER_LISTEN_MS = 90000
+const CLIENT_MAX_WAIT_MS = 420000
+
+
+func _client_deadline():
+	var now = OS.get_ticks_msec()
+	if net_since == 0:
+		net_since = now
+	if listening_since == 0 and str(server_status().get("phase", "")) == "listening":
+		listening_since = now
+	if (listening_since > 0 and now - listening_since > CLIENT_AFTER_LISTEN_MS) or now - net_since > CLIENT_MAX_WAIT_MS:
+		gave_up = true
+		link.bot_unreachable("The bot's copy of the game couldn't reach the bot server on 127.0.0.1:%d (it tried for %d s)." % [
+			port, (now - net_since) / 1000])
+		return true
+	return false
+
+
 func _net():
+	if gave_up:
+		return
 	if peer == null or (not connected and peer.get_status() in [StreamPeerTCP.STATUS_NONE, StreamPeerTCP.STATUS_ERROR]):
 		if OS.get_ticks_msec() < retry_at:
 			return
 		retry_at = OS.get_ticks_msec() + 1000
+		if side == "client" and server.empty() and _client_deadline():
+			return
 		peer = StreamPeerTCP.new()
 		peer.connect_to_host(host, port)
 		return
@@ -287,7 +364,9 @@ func _on_hello(r):
 		settings_opt.select(max(0, preset_names.find(str(opts.get("settings", "standard")))))
 		pick_opt.select(max(0, pick_styles.find(str(opts.get("pick", "mixed")))))
 		estimate_box.pressed = bool(opts.get("show_estimate", false))
-		think_box.pressed = bool(opts.get("think_until_lockin", false))
+		timer_box.pressed = _timer_default(str(preset_names[max(0, settings_opt.selected)]))
+		# with the turn timer on the bot uses its clock: it deepens until you lock in or its deadline
+		think_box.pressed = bool(opts.get("think_until_lockin", false)) or timer_box.pressed
 	if autoplay:
 		_next_or_quit(r.get("next"))
 	else:
@@ -327,12 +406,16 @@ func _start_match(p1, p2, seed_):
 		_send({"type": "abort", "reason": "a new match was started"})
 	var options = {}
 	var preset = str(server.get("options", {}).get("settings", "standard"))
+	var timer_on = _timer_default(preset)
 	if not autoplay:  # the panel's choices; autoplay keeps the launcher's
 		preset = str(preset_names[max(0, settings_opt.selected)])
+		timer_on = timer_box.pressed
 		options = {"pick": pick_styles[max(0, pick_opt.selected)], "show_estimate": estimate_box.pressed,
-			"settings": preset, "think_until_lockin": think_box.pressed}
-	var think = think_box.pressed if not autoplay else bool(server.get("options", {}).get("think_until_lockin", false))
-	var msg = {"p1": p1, "p2": p2, "seed": seed_, "settings": _with_preset(preset), "options": options, "think": think}
+			"settings": preset, "think_until_lockin": think_box.pressed, "turn_timer": timer_on}
+	var think = think_box.pressed if not autoplay else bool(server.get("options", {}).get("think_until_lockin", false)) or timer_on
+	if autoplay:  # the launcher's choices, with thinking on the clock as the panel's default
+		options = {"think_until_lockin": think, "turn_timer": timer_on}
+	var msg = {"p1": p1, "p2": p2, "seed": seed_, "settings": _match_settings(preset, timer_on), "options": options, "think": think}
 	if side == "host":
 		# The client tells the server and starts the same match; both games then run it in lockstep.
 		link.to_client("match", msg)
@@ -358,7 +441,7 @@ func _launch(msg):
 	match_ = {"p1": msg.p1, "p2": msg.p2, "seed": msg.seed}
 	think_on = bool(msg.think)
 	var match_settings = msg.settings
-	turn_ms = int(float(match_settings.get("turn_time", 0)) * 1000) if str(match_settings.get("timer_mode", "none")) == "default" else 0
+	_release_clock()
 	var data = match_settings.duplicate(true)
 	data["singleplayer"] = side == "single"
 	data["selected_characters"] = {1: {"name": msg.p1}, 2: {"name": msg.p2}}
@@ -395,6 +478,8 @@ func _launch(msg):
 	pending_turn = -1
 	depth_text = ""
 	p1_locked_tick = -1000
+	submitted_for = -1
+	p2_timeouts = 0
 	phase = "starting"
 	if panel:
 		panel.hide()
@@ -421,6 +506,37 @@ func _with_preset(name):
 	return s
 
 
+# The panel's "Turn timer" default for a preset: on when the preset has a timer (ranked: the game's ranked clock),
+# off otherwise (standard). The launcher's turn_timer option, when it gives one, decides instead.
+func _timer_default(name):
+	var opts = server.get("options", {})
+	if typeof(opts) == TYPE_DICTIONARY and typeof(opts.get("turn_timer")) == TYPE_BOOL:
+		return opts.turn_timer
+	return str(presets.get(name, {}).get("timer_mode", "none")) != "none"
+
+
+# A match's settings: the preset's, with the game's turn timer on or off. On: the preset's own timer (ranked: a
+# chess clock), or for a preset without one the game's lobby timer (the settings panel's defaults; a per-turn
+# timer if those name none). Off: no timer (the standard settings' clock keys, timer_mode "none").
+func _match_settings(name, timer_on):
+	var s = _with_preset(name)
+	if timer_on and str(s.get("timer_mode", "none")) == "none":
+		for k in lobby_timer:
+			s[k] = lobby_timer[k]
+		if str(s.get("timer_mode", "none")) == "none":
+			s["timer_mode"] = "default"
+	elif not timer_on:
+		for k in TIMER_KEYS:
+			if settings.has(k):
+				s[k] = settings[k]
+	return s
+
+
+func _on_preset_selected(i):
+	timer_box.pressed = str(presets.get(str(preset_names[max(0, i)]), {}).get("timer_mode", "none")) != "none"
+	think_box.pressed = timer_box.pressed  # on the clock, the bot thinks until you lock in (or its deadline)
+
+
 func _on_match_started(r):
 	if not r.get("ok", false):
 		desynced = true
@@ -443,9 +559,15 @@ func _attach():
 	game.p1.connect("action_selected", self, "_on_input", [1])
 	game.p2.connect("action_selected", self, "_on_input", [2])
 	if side == "single":
-		# P2 is the bot's: no keyboard lock-in, no auto-continue, never shown.
+		# P2 is the bot's: shown greyed and clickable, as an online opponent's (its clicks set only P2's
+		# ghost), but no keyboard lock-in, no auto-continue and a Select that does nothing.
 		p2_panel.set_process_input(false)
 		p2_panel.get_node("%AutoButton").set_pressed_no_signal(false)
+		var sel = p2_panel.get_node("%SelectButton")
+		if sel.is_connected("pressed", p2_panel, "_on_submit_pressed"):
+			sel.disconnect("pressed", p2_panel, "_on_submit_pressed")
+		p2_panel.modulate = Color("b3b3b3")  # the game's tint for an online opponent's panel
+		_take_clock()
 	phase = "playing"
 
 
@@ -454,8 +576,6 @@ func _play_frame():
 		_abort("the match was closed")
 		return
 	if side == "single":
-		if p2_panel.visible:
-			p2_panel.hide()
 		for p in [p1_panel, p2_panel]:
 			var u = p.get_node("%UndoButton")
 			if u.visible:
@@ -469,11 +589,13 @@ func _play_frame():
 		_decision()
 	if pick != null and p2_panel.active and game.p2.state_interruptable:
 		_submit_pick()
-	# A per-turn timer: tell the server to answer now, 1.5 s before it runs out (any search mode). The
-	# server stops itself earlier (its deadline margin); this is the game's own clock, as a backstop.
-	if pick_pending and not deadline_sent and turn_ms > 0 and OS.get_ticks_msec() - decision_msec >= turn_ms - 1500:
-		deadline_sent = true
-		_notify({"type": "deadline", "turn": pending_turn})
+	# A turn timer: tell the server to answer now, BACKSTOP_S before the bot's clock (the game's own P2 timer,
+	# read as it runs) ends, in any mode and search. The server stops itself earlier (its deadline margin).
+	if pick_pending and not deadline_sent:
+		var left = _bot_clock_left()
+		if left >= 0 and left <= BACKSTOP_S:
+			deadline_sent = true
+			_notify({"type": "deadline", "turn": pending_turn})
 	if autoplay and auto_tick != decision_tick and decision_tick == game.current_tick and p1_panel.active and game.p1.state_interruptable:
 		auto_tick = decision_tick
 		_autoplay_p1()
@@ -482,11 +604,18 @@ func _play_frame():
 func _decision():
 	var prev = decision_tick
 	decision_tick = game.current_tick
+	if single_clock:
+		_clock_turn_start()
 	var msg = {"type": "decision", "turn": turn, "snapshot": _snapshot()}
 	if turn > 0:
+		if submitted_for != pending_turn:  # P2's clock ran out before the bot's answer: P2 played the timeout's move
+			p2_fallback = true
+			p2_timeouts += 1
 		msg["inputs"] = _inputs_for(prev)
 		msg["p2_fallback"] = p2_fallback
 	p2_fallback = false
+	if side == "single":  # before any click on P2's panel can change it
+		p2_extra = p2_panel.get_extra()
 	shown_estimate = estimate  # last turn's estimate: that turn has now been played
 	estimate = null
 	pick = null
@@ -520,6 +649,9 @@ func _on_net_turn_ready(id):
 
 
 func _on_pick(r):
+	# An answer to an earlier decision (P2's clock ran out first and the next turn has opened): too late, dropped.
+	if typeof(r.get("turn")) in [TYPE_INT, TYPE_REAL] and int(r.turn) != pending_turn:
+		return
 	pick_pending = false
 	if phase != "playing":
 		return
@@ -552,11 +684,134 @@ func _submit_pick():
 			p2_fallback = true
 	# Single: P2's panel's own Select call. Client: this game's player is P2, so the same call also does
 	# Network.submit_action, exactly as a player's Select does online.
+	# A pick without extra would take the panel's, which the player may have clicked: the untouched one.
+	if e == null and side == "single":
+		e = p2_extra
+	var left = _bot_clock_left()  # read before the lock-in pauses it
+	submitted_for = pending_turn
 	p2_panel.on_action_submitted(a, d, e)
-	if side == "single":
-		p2_panel.hide()
+	var clock = "" if left < 0 else "; its clock had %.2f s left" % left
+	if side != "single":
+		link.trace("turn %d: P2 locked in %d ms after the turn opened%s" % [pending_turn, OS.get_ticks_msec() - decision_msec, clock])
+	elif left >= 0:
+		print("YomiHuman: turn %d: P2 locked in %d ms after the turn opened%s" % [pending_turn, OS.get_ticks_msec() - decision_msec, clock])
+
+
+# --- the turn timer ------------------------------------------------------------------------------
+
+# Seconds left on the bot's clock (the game's own P2 turn timer) while it runs this turn, else -1 (no timer, or
+# it isn't running: before the turn's clock starts, or after P2 locked in).
+func _bot_clock_left():
+	if not is_instance_valid(main) or main.ui_layer == null or str(main.ui_layer.timer_mode) == "none":
+		return -1.0
+	var t = main.ui_layer.p2_turn_timer
+	if t.is_stopped() or t.paused:
+		return -1.0
+	return t.time_left
+
+
+func _turn_timer(id):
+	return main.ui_layer.p1_turn_timer if id == 1 else main.ui_layer.p2_turn_timer
+
+
+# Single, at the match's start: with a timer in its settings, this script runs the game's two turn timers (the
+# game starts them only online) and takes their expiry, so the bot's side times out as the bot, not as a click
+# on its greyed panel. The labels show as online.
+func _take_clock():
+	var ui = main.ui_layer
+	single_clock = str(ui.timer_mode) != "none"
+	if not single_clock:
+		return
+	for id in [1, 2]:
+		var t = _turn_timer(id)
+		if t.is_connected("timeout", ui, "_on_turn_timer_timeout"):
+			t.disconnect("timeout", ui, "_on_turn_timer_timeout")
+		if not t.is_connected("timeout", self, "_on_clock_timeout"):
+			t.connect("timeout", self, "_on_clock_timeout", [id])
+	ui.get_node("%P1TurnTimerLabel").show()
+	ui.get_node("%P2TurnTimerLabel").show()
+
+
+# Gives the game back its own expiry handling (a new match, or a game started from the game's own menus).
+func _release_clock():
+	single_clock = false
+	if not is_instance_valid(main) or main.ui_layer == null:
+		return
+	var ui = main.ui_layer
+	for id in [1, 2]:
+		var t = _turn_timer(id)
+		if t.is_connected("timeout", self, "_on_clock_timeout"):
+			t.disconnect("timeout", self, "_on_clock_timeout")
+		if not t.is_connected("timeout", ui, "_on_turn_timer_timeout"):
+			t.connect("timeout", ui, "_on_turn_timer_timeout", [id])
+
+
+# A turn opens (single): the clocks as the game's UILayer.on_player_actionable sets them online. The first turn
+# starts both banks (main.gd sized them from the settings); later ones restart a per-turn timer, add an
+# increment (the game's own _apply_increment), or top a chess bank up to its per-turn minimum. P1's lock-in
+# pauses its clock through the game's own end_turn_for, as online.
+func _clock_turn_start():
+	var ui = main.ui_layer
+	var mode = str(ui.timer_mode)
+	if not ui.game_started:
+		if mode == "chess":
+			ui.MIN_TURN_TIME = game.match_data.get("turn_min_length", ui.MIN_TURN_TIME)
+		elif mode == "increment":
+			ui.MIN_TURN_TIME = game.match_data.get("increment_per_turn", 0)
+		ui.p1_turn_timer.start()
+		ui.p2_turn_timer.start()
+		ui.game_started = true
+	elif mode == "default":
+		ui.p1_turn_timer.start(ui.turn_time)
+		ui.p2_turn_timer.start(ui.turn_time)
+	elif mode == "increment":
+		ui._apply_increment(1)
+		ui._apply_increment(2)
+		ui.p1_time_run_out = false
+		ui.p2_time_run_out = false
 	else:
-		link.trace("turn %d: P2 locked in %d ms after the turn opened" % [pending_turn, OS.get_ticks_msec() - decision_msec])
+		for t in [ui.p1_turn_timer, ui.p2_turn_timer]:
+			if t.time_left < ui.MIN_TURN_TIME:
+				t.start(ui.MIN_TURN_TIME)
+	ui.p1_turn_timer.paused = false
+	ui.p2_turn_timer.paused = false
+	ui.get_node("%P1TurnTimerBar").show()
+	ui.get_node("%P2TurnTimerBar").show()
+
+
+# A clock ran out (single): as the game's UILayer._on_turn_timer_timeout does for a player online. P1's panel
+# locks in what it holds (the game's ActionButtons.timeout). The bot's side: if its answer hasn't come, P2
+# holds (Continue, the server's own move when its deadline cuts even its quick search); the late answer is
+# dropped (_on_pick).
+func _on_clock_timeout(id):
+	if not single_clock or not is_instance_valid(game) or not is_instance_valid(main):
+		return
+	var ui = main.ui_layer
+	var t = _turn_timer(id)
+	if str(ui.timer_mode) == "increment":
+		var inc = float(game.match_data.get("increment_per_turn", 0))
+		if id == 1:
+			ui.p1_debt += inc
+			ui.p1_just_ran_out = true
+		else:
+			ui.p2_debt += inc
+			ui.p2_just_ran_out = true
+		t.start(inc)
+		_timed_out(id)
+		return
+	_timed_out(id)
+	t.wait_time = ui.MIN_TURN_TIME
+	t.start()
+	t.paused = true
+
+
+func _timed_out(id):
+	if id == 1:
+		p1_panel.timeout()
+	elif p2_panel.active and not game.game_finished:
+		print("YomiHuman: turn %d: P2's clock ran out before the bot answered: P2 holds" % pending_turn)
+		pick = null
+		p2_panel.on_action_submitted("Continue", null, p2_extra)
 
 
 func _on_input(_action, _data, _extra, id):
@@ -593,6 +848,14 @@ func _on_game_ended(_winner = null):
 		w = 0
 	elif game.p2.hp > game.p1.hp:
 		w = 1
+	if single_clock or (side == "client" and str(main.ui_layer.timer_mode) != "none"):
+		if turn > 0 and submitted_for != pending_turn:
+			p2_timeouts += 1
+		var note = "turn timer %s: P2 timed out on %d of %d turns" % [str(main.ui_layer.timer_mode), p2_timeouts, turn]
+		if side == "client":
+			link.trace(note)
+		else:
+			print("YomiHuman: ", note)
 	_send({"type": "end", "turn": turn, "inputs": _inputs_for(decision_tick), "snapshot": _snapshot(), "winner": w},
 		"_on_result")
 
@@ -619,6 +882,7 @@ func _on_result(r):
 
 
 func _abort(reason):
+	_release_clock()
 	if phase == "playing" or phase == "starting":
 		if side == "host":
 			link.to_client("abort", reason)
@@ -882,6 +1146,11 @@ func _make_overlay():
 	think_box = CheckBox.new()
 	think_box.text = "Bot thinks until you lock in"
 	box.add_child(think_box)
+	timer_box = CheckBox.new()
+	timer_box.text = "Turn timer (the game's online timer; ranked: on)"
+	timer_box.pressed = _timer_default(str(preset_names[0]))
+	box.add_child(timer_box)
+	settings_opt.connect("item_selected", self, "_on_preset_selected")
 	start_btn = Button.new()
 	start_btn.text = "Start game"
 	start_btn.connect("pressed", self, "_on_start_pressed")
@@ -894,9 +1163,17 @@ func _make_overlay():
 	info = Label.new()
 	info.autowrap = true
 	box.add_child(info)
-	_show_panel("YomiBench: connecting to the bot server...", "")
+	_show_panel(wait_title if wait_title != "" else "YomiBench: connecting to the bot server...", wait_text)
 	if autoplay:
 		panel.hide()
+
+
+# Host: VsBot.gd's progress and failure texts while the bot isn't up (the server's phase, or why it gave up).
+func show_wait(t, text):
+	wait_title = t
+	wait_text = text
+	if server.empty():
+		_show_panel(t, text)
 
 
 func _on_back_pressed():
@@ -965,6 +1242,8 @@ func _update_status():
 # Host: no "bot is thinking": as online, the game's own timer bar and sound say when the other side locked in.
 func _update_host_status():
 	var s = "YomiBench multiplayer vs %s" % str(server.get("bot", "?")) if not server.empty() else "YomiBench: starting the bot's game..."
+	if server.empty() and wait_text != "":
+		s = "YomiBench: " + wait_text.split("\n")[0]
 	if phase == "playing":
 		s += "  |  game %d, turn %d" % [games_played + 1, turn]
 		if remote_status.get("desynced", false) or desynced:

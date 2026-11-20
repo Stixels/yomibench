@@ -112,6 +112,14 @@ func bot_lost():
 	_quit("lost the bot server")
 
 
+# YomiHuman (client side) gave up on the bot server: the host shows why, then this copy quits (after a moment, so
+# the message leaves first; if the host never joined, its own deadlines say it).
+func bot_unreachable(text):
+	to_host("bot_unreachable", text)
+	yield(get_tree().create_timer(3.0), "timeout")
+	_quit(text)
+
+
 func _quit(why):
 	print("YomiBench client: ", why)
 	set_process(false)

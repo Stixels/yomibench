@@ -13,7 +13,8 @@ extends Node
 #
 # The server is found in this order:
 #  1. user://yomibench_vsbot.json: {"server": "<exe>", "args": [...extra args before ours...], "out": "<folder>",
-#     "exit_with": false} (development: e.g. a Python interpreter and a script; use forward slashes in paths);
+#     "exit_with": false, "app": false} (development: e.g. a Python interpreter and a script; use forward slashes in
+#     paths; "app": true when it is packaging/windows/yomibench_app.py, which takes --game-dir and writes its status);
 #  2. the server inside the one-step mod (res://YomiBenchVsBot/server, copied to user:// on first use);
 #  3. the YomiBench install: %LOCALAPPDATA%\Programs\YomiBench\server\yomibench-bot-server.exe.
 # Games go to "out" (default: Documents\YomiBench\games-root), marked held out of training by the server.
@@ -26,6 +27,19 @@ const CLIENT_DIR = "user://yomibench-mp-client"
 const CLIENT_SCRIPTS = ["MpClient.gd", "MpLink.gd", "YomiHuman.gd", "SteamStub.gd"]
 const LINK = preload("res://YomiBenchVsBot/MpLink.gd")
 const HELLO_TIMEOUT_MS = 90000
+# Waiting for the bot (the app's server writes its progress to bot-server.status: YomiHuman.server_status). Every
+# deadline ends the wait with the reason on the panel, never a silent "connecting..." forever.
+const NO_STATUS_MS = 30000       # no status file from our server this long after starting it: it never ran
+const AFTER_LISTEN_MS = 60000    # listening, but no hello through the bot's copy this long after
+const STALE_S = 30               # the status file's heartbeat (5 s) stopped this long: the server is gone
+const STALE_STARTING_S = 120     # ... while it still imports (before its heartbeat starts)
+const PHASE_TEXT = {
+	"starting": "Starting the bot server...",
+	"finding game": "Finding your game install...",
+	"building game data": "Building the bot's game data from your game (first run, up to a minute)...",
+	"loading bot": "Loading the bot...",
+	"listening": "Starting the bot's copy of the game...",
+}
 
 var pid = -1
 var client_pid = -1
@@ -40,6 +54,15 @@ var client_peer = 0      # the client's network id, once it gave the token
 var started_msec = 0
 var leaving = false
 var link = null         # MpLink.gd: our RPCs (the same script, at the same path, in the client)
+var app_server = false  # the YomiBench app's server (bundled or installed): it takes --game-dir, writes its status
+var waiting = false     # the bot isn't up yet (no hello)
+var failed = false
+var spawn_msec = 0
+var spawn_unix = 0
+var server_pid = 0      # the pid in the status file we follow (ours: pid, or the first written after our start)
+var last_phase = ""
+var listen_msec = 0
+var next_poll = 0
 
 
 static func instance(tree):
@@ -95,22 +118,30 @@ func launch():
 		return false
 	var cmd = _server_command()
 	if cmd.empty():
-		_message("The YomiBench bot server isn't installed. Install YomiBench, or set \"server\" in %s." %
-			ProjectSettings.globalize_path(CONFIG))
+		_message(("The YomiBench bot server isn't installed, or Windows Security removed it (Windows Security > " +
+			"Virus & threat protection > Protection history: restore or allow yomibench-bot-server.exe). Install " +
+			"YomiBench or re-add the mod, or set \"server\" in %s.\n\n%s") % [ProjectSettings.globalize_path(CONFIG), _log_paths()])
 		return false
 	port = _free_port()
+	app_server = cmd.app
 	var args = cmd.args.duplicate()
 	args += ["--port", str(port), "--out", cmd.out]
 	if cmd.exit_with:  # the installed server stops by itself if the game ends without saying so (a crash)
 		args += ["--exit-with", str(OS.get_process_id())]
+	if app_server:  # the scenes come from this very game (no Steam library search)
+		args += ["--game-dir", OS.get_executable_path().get_base_dir()]
 	var sched = autoplay_schedule()
 	if sched != "":
 		args += ["--autoplay", sched]
 	_log("starting the bot server: %s %s" % [cmd.exe, str(args)])
+	spawn_unix = OS.get_unix_time()
 	pid = _spawn(cmd.exe, args)
 	if pid <= 0:
-		_message("Couldn't start the bot server (%s)." % cmd.exe)
+		_message(("Couldn't start the bot server (%s). Windows Security may have blocked it: check Windows Security > " +
+			"Virus & threat protection > Protection history.\n\n%s") % [cmd.exe, _log_paths()])
 		return false
+	spawn_msec = OS.get_ticks_msec()
+	waiting = true
 	var err = _host()
 	if err != "":
 		_stop_children()
@@ -194,11 +225,81 @@ func _process(_delta):
 	if life_conn == null and life.is_connection_available():
 		life_conn = life.take_connection()  # held open, never read: closing it (or this game ending) ends the client
 		life.stop()
-	if client_peer == 0 and started_msec > 0 and OS.get_ticks_msec() - started_msec > HELLO_TIMEOUT_MS:
+	if waiting and human != null:
+		if not human.server.empty():
+			waiting = false
+			_log("the bot is up (%.1f s after starting the server)" % ((OS.get_ticks_msec() - spawn_msec) / 1000.0))
+		elif OS.get_ticks_msec() >= next_poll:
+			next_poll = OS.get_ticks_msec() + 1000
+			_check_server()
+	if client_peer == 0 and started_msec > 0 and OS.get_ticks_msec() - started_msec > HELLO_TIMEOUT_MS and not failed:
 		started_msec = 0
-		_log("the bot's game never joined")
-		if human:
-			human._say("The bot's copy of the game didn't start. Go back to the main menu and try again.")
+		_fail("The bot's copy of the game didn't start. Go back to the main menu and try again.")
+
+
+# Once a second while the bot isn't up: the server's phase on the panel, and the deadlines.
+func _check_server():
+	var now = OS.get_ticks_msec()
+	var st = HUMAN.server_status() if app_server else {}
+	var spid = int(st.get("pid", 0))
+	var ours = not st.empty() and (spid == pid or spid == server_pid or (server_pid == 0 and float(st.get("time", 0)) >= spawn_unix - 1))
+	if ours:
+		if server_pid == 0:
+			server_pid = spid
+		var phase = str(st.phase)
+		var detail = str(st.get("detail", ""))
+		if phase != last_phase:
+			last_phase = phase
+			_log("bot server: %s%s (%.1f s)" % [phase, ": " + detail if detail != "" else "", (now - spawn_msec) / 1000.0])
+			if phase == "listening":
+				listen_msec = now
+		if phase == "error":
+			_fail("The bot server stopped: %s" % detail)
+		elif phase == "stopped":
+			_fail("The bot server stopped before the bot's copy of the game reached it.")
+		elif OS.get_unix_time() - float(st.get("time", 0)) > (STALE_STARTING_S if phase == "starting" else STALE_S):
+			_fail("The bot server stopped without saying why (at \"%s\"; antivirus may have closed it). Its last log line: %s" % [
+				phase, _last_log_line()])
+		elif listen_msec > 0 and now - listen_msec > AFTER_LISTEN_MS:
+			_fail("The bot's copy of the game couldn't reach the bot server.")
+		elif human:
+			human.show_wait("YomiBench: connecting to the bot server...", PHASE_TEXT.get(phase, phase))
+	elif app_server and server_pid == 0 and now - spawn_msec > NO_STATUS_MS:
+		_fail("The bot server didn't start (Windows Security may have blocked yomibench-bot-server.exe: check Windows " +
+			"Security > Virus & threat protection > Protection history, and restore or allow it).")
+
+
+# Stop waiting: say why on the panel (and in the log), with where the logs are; end the server and the bot's copy.
+func _fail(text):
+	if failed:
+		return
+	failed = true
+	waiting = false
+	_log("never ready within %.0f s: %s" % [(OS.get_ticks_msec() - spawn_msec) / 1000.0, text])
+	_stop_children()
+	if human:
+		human.show_wait("YomiBench: the bot couldn't start", text + "\n\n" + _log_paths() +
+			"\nGo back to the main menu to try again.")
+	if autoplay_schedule() != "":
+		get_tree().quit(3)  # a test: end with an error
+
+
+func _log_paths():
+	var server_log = HUMAN.server_file("bot-server.log").replace("/", "\\")
+	return "Details: %s\nand %s" % [server_log, ProjectSettings.globalize_path("user://yomibench_vsbot.log").replace("/", "\\")]
+
+
+func _last_log_line():
+	var f = File.new()
+	var path = HUMAN.server_file("bot-server.log")
+	if path == "" or not f.file_exists(path) or f.open(path, File.READ) != OK:
+		return "(no log)"
+	var n = f.get_len()
+	f.seek(max(0, n - 4096))
+	var lines = f.get_buffer(n - f.get_position()).get_string_from_utf8().strip_edges().split("\n")
+	f.close()
+	var last = str(lines[lines.size() - 1]).strip_edges() if lines.size() > 0 else ""
+	return last.left(300) if last != "" else "(empty)"
 
 
 func _on_peer_connected(id):
@@ -309,6 +410,9 @@ func on_mp_from_bot(sender, kind, payload):
 		return
 	if str(kind) == "trace":
 		_log("bot's game: " + str(payload))
+	elif str(kind) == "bot_unreachable":
+		if waiting:
+			_fail(str(payload))
 	elif human:
 		human.on_bot_message(str(kind), payload)
 
@@ -459,15 +563,15 @@ func _server_command():
 		f.close()
 		if typeof(cfg) == TYPE_DICTIONARY and str(cfg.get("server", "")) != "":
 			return {"exe": str(cfg.server), "args": Array(cfg.get("args", [])), "out": str(cfg.get("out", out)),
-				"exit_with": bool(cfg.get("exit_with", false))}
+				"exit_with": bool(cfg.get("exit_with", false)), "app": bool(cfg.get("app", false))}
 	var bundled = _bundled_server()
 	if bundled != "":
-		return {"exe": bundled, "args": [], "out": out, "exit_with": true}
+		return {"exe": bundled, "args": [], "out": out, "exit_with": true, "app": true}
 	var local = OS.get_environment("LOCALAPPDATA")
 	if local != "":
 		var exe = local.plus_file("Programs").plus_file("YomiBench").plus_file("server").plus_file("yomibench-bot-server.exe")
 		if f.file_exists(exe):
-			return {"exe": exe, "args": [], "out": out, "exit_with": true}
+			return {"exe": exe, "args": [], "out": out, "exit_with": true, "app": true}
 	return {}
 
 
