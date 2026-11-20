@@ -179,6 +179,7 @@ def build_run_dir(game_dir: Path, run_dir: Path | None = None, user_dir_name: st
     from yomibench import plugins
 
     overlays = plugins.mod_overlays("YomiBench")
+    overlays = {name: src for name, src in overlays.items() if src.is_file()}  # listed but not shipped: skipped
     for name, src in overlays.items():
         shutil.copyfile(src, scripts / name)
     for old in scripts.glob("*.gd"):  # a script a plugin added to an earlier build of this run dir

@@ -7,6 +7,15 @@ import pytest
 from yomibench import engine, game, localconfig, plugins
 
 
+@pytest.fixture(autouse=True)
+def _no_installed_plugins(monkeypatch):
+    """Only the plugins each test names: none from installed packages' entry points."""
+    monkeypatch.setattr(plugins.metadata, "entry_points", lambda **kw: [])
+    plugins.load.cache_clear()
+    yield
+    plugins.load.cache_clear()
+
+
 @pytest.fixture
 def fake_plugin(tmp_path, monkeypatch):
     overlay = tmp_path / "Extra.gd"

@@ -218,7 +218,10 @@ def test_run_dir_gets_override_cfg_and_our_scripts_only(tmp_path):
     assert sorted(p.name for p in run.iterdir()) == sorted([game.EXE, game.PACK, *libs, "override.cfg", "yomibench"])
     cfg = (run / "override.cfg").read_text()
     assert 'SteamHustle="*' in cfg and "/yomibench/SteamStub.gd" in cfg and "/yomibench/YomiServer.gd" in cfg
-    assert sorted(p.name for p in (run / "yomibench").iterdir()) == sorted(game.MOD_SCRIPTS)
+    from yomibench import plugins
+
+    want = set(game.MOD_SCRIPTS) | set(plugins.mod_overlays("YomiBench"))  # plus an installed plugin's files
+    assert sorted(p.name for p in (run / "yomibench").iterdir()) == sorted(want)
     # idempotent
     assert game.build_run_dir(install, run) == run
 
