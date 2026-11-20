@@ -107,16 +107,28 @@ INPUTS = ("nums0", "cats0", "nums1", "cats1")
 SHARD_GAMES = 1000  # games per shard file set within one build (bounds the builder's memory)
 
 
+# The encoder's identity, stored in every cache manifest: a cache built under another identity is rebuilt. It
+# names what encoding a record gives, not the source text: comments and docstrings don't change it. Bump it only
+# when encoded rows change (that rebuilds every cache); tests/test_encoder_identity.py fails when the code it
+# covers (encoder_inputs) changes, and says which to do. 853f7784eeb12ad1 was the source hash of these inputs
+# before a docstring-only edit; rows encoded since are byte-identical to it.
+ENCODER = "853f7784eeb12ad1"
+
+
 def encoder_hash() -> str:
-    """Changes whenever encoding a record could give different rows."""
+    """The encoder identity caches are keyed by (ENCODER)."""
+    return ENCODER
+
+
+def encoder_inputs() -> list[str]:
+    """The code and constants that decide encoded rows: FORMAT, the feature version, the features module, how
+    record keys are made (compat.record_keys), the slim record reader, DI filling, and the baseline evaluator."""
     from yomibench import compat, features, search, selfplay, valuenet
 
-    # compat.record_keys decides each source's stored record keys (game, candidate set).
-    parts = [f"format {FORMAT}", f"features {valuenet.FEATURES}", inspect.getsource(features),
-             inspect.getsource(compat.record_keys),
-             inspect.getsource(selfplay.read_slim), inspect.getsource(selfplay._fill_di),
-             inspect.getsource(search.evaluate), inspect.getsource(search.terminal_value)]
-    return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:16]
+    return [f"format {FORMAT}", f"features {valuenet.FEATURES}", inspect.getsource(features),
+            inspect.getsource(compat.record_keys),
+            inspect.getsource(selfplay.read_slim), inspect.getsource(selfplay._fill_di),
+            inspect.getsource(search.evaluate), inspect.getsource(search.terminal_value)]
 
 
 def cache_dir(record_dir: Path, root: Path | None = None) -> Path:
