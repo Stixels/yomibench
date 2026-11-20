@@ -124,10 +124,17 @@ def summary(session: Session, log: Callable[[str], None] = print) -> None:
     log(f"turn logs: {session.out / 'games'}\nresult rows: {session.ledger_path}")
 
 
+def turn_timer_arg(args) -> bool | None:
+    """--turn-timer on|off as the Session's turn_timer (None: the preset's default)."""
+    v = getattr(args, "turn_timer", None)
+    return None if v is None else v == "on"
+
+
 def session_kwargs(args, bot) -> dict:
     """Session keyword arguments from a launcher's play flags (human_play.add_play_args) and its bot."""
     return dict(label=bot.label, model=bot.model, pick=args.pick, show_estimate=args.show_estimate,
                 settings=args.settings, think_until_lockin=args.think_until_lockin,
+                turn_timer=turn_timer_arg(args),
                 deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
                 engine_spec=getattr(args, "engine", None))
 

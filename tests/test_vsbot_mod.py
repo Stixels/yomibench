@@ -33,6 +33,18 @@ def test_only_the_shared_link_script_declares_rpcs():
         assert has == (f.name == "MpLink.gd"), f.name
 
 
+def test_a_stuck_start_ends_with_a_reason_and_both_logs():
+    vsbot = (MOD / "VsBot.gd").read_text()
+    for text in ["The bot server didn't start (Windows Security may have blocked yomibench-bot-server.exe",
+                 "The bot server stopped: %s", "The bot's copy of the game couldn't reach the bot server.",
+                 "Protection history"]:
+        assert text in vsbot, text
+    assert '"bot-server.log"' in vsbot and "user://yomibench_vsbot.log" in vsbot
+    # the client copy's give-up reaches the host
+    assert '"bot_unreachable"' in vsbot and "func bot_unreachable" in (MOD / "MpClient.gd").read_text()
+    assert "link.bot_unreachable(" in (ROOT / "mod" / "YomiBench" / "YomiHuman.gd").read_text()
+
+
 def test_the_zip_is_deterministic(tmp_path):
     a = build_vsbot_mod.build(tmp_path / "a").read_bytes()
     b = build_vsbot_mod.build(tmp_path / "b").read_bytes()

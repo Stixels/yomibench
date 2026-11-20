@@ -407,7 +407,7 @@ class Session:
                  engine_factory: Callable[[], Engine] | None = None, ledger_path: Path | str | None = None,
                  schedule: list[tuple[str, str, int]] | None = None, mode: str = "human", scene: str | None = None,
                  model: dict[str, Any] | None = None, pick: str = "mixed", show_estimate: bool = False,
-                 settings: str = "standard", think_until_lockin: bool = False,
+                 settings: str = "standard", think_until_lockin: bool = False, turn_timer: bool | None = None,
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
                  deadline_fraction: float = anytime.DEADLINE_FRACTION, log: Callable[[str], None] = print,
                  engine_spec: str | None = None):
@@ -451,7 +451,9 @@ class Session:
         if settings in self.presets_refused:
             raise ValueError(f"this sim can't play the {settings} settings: {self.presets_refused[settings]}")
         self.options = self._options({"pick": pick, "show_estimate": show_estimate, "settings": settings,
-                                      "think_until_lockin": think_until_lockin})
+                                      "think_until_lockin": think_until_lockin,
+                                      # the panel's "Turn timer" default; unset: on for a preset with a timer (ranked)
+                                      **({} if turn_timer is None else {"turn_timer": bool(turn_timer)})})
         self.schedule = list(schedule or [])  # autoplay: (p1, p2, seed) games the mod starts in order
         self.mode = mode
         self.log = log
@@ -535,7 +537,7 @@ class Session:
             if k == "pick":
                 if v not in PICK_STYLES:
                     raise ValueError(f"pick style must be one of {', '.join(PICK_STYLES)}, not {v!r}")
-            elif k in ("show_estimate", "think_until_lockin"):
+            elif k in ("show_estimate", "think_until_lockin", "turn_timer"):
                 v = bool(v)
             elif k == "settings":
                 if v not in self.presets:
@@ -566,9 +568,9 @@ class Session:
         # The real match's settings decide; the preset name is only the panel's label for them.
         overrides, unknown = self._overrides(settings)
         timer = self._timer_of(settings)
-        # compared as overrides of standard, so a preset naming a standard value (has_ceiling true) still matches
-        preset = next((n for n, o in self.presets.items()
-                       if self._overrides(o)[0] == overrides and self._timer_of(o) == timer), None)
+        # compared as overrides of standard, so a preset naming a standard value (has_ceiling true) still matches.
+        # The label names the simulated settings: the turn timer is the panel's own switch ("timer" in the header).
+        preset = next((n for n, o in self.presets.items() if self._overrides(o)[0] == overrides), None)
         gid = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{self.label}-{p1}-{p2}-{seed}"
         gid = "".join(ch if ch.isalnum() or ch in "-_.@" else "_" for ch in gid)
         if not getattr(self.engine, "reusable", False):
@@ -681,7 +683,7 @@ class Session:
             g.pick = {"action": "Continue", "data": None, "extra": None}
             line.update({"state": obs.state if obs else None, "bot": None, "pick": g.pick})
             g.pending = line
-            return {"type": "pick", **g.pick, "fallback": True, "desynced": True}
+            return {"type": "pick", "turn": turn, **g.pick, "fallback": True, "desynced": True}
         t = time.perf_counter()
         depth = None
         think = bool(g.options.get("think_until_lockin"))
@@ -697,7 +699,7 @@ class Session:
         g.pick = {k: bot_info["pick"][k] for k in ("action", "data", "extra")}
         line.update({"sim_turn": obs.turn, "state": obs.state, "actionable": list(obs.actionable), "bot": bot_info})
         g.pending = line
-        reply = {"type": "pick", **g.pick, "desynced": g.desynced}
+        reply = {"type": "pick", "turn": turn, **g.pick, "desynced": g.desynced}
         if bot_info.get("fallback"):
             reply["fallback"] = True
         if depth is not None:
@@ -1056,6 +1058,9 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--deadline-fraction", type=float, default=anytime.DEADLINE_FRACTION,
                     help="... or this fraction of the turn's time, whichever is more "
                          f"(default {anytime.DEADLINE_FRACTION:g}: a 15 s turn is answered by 12.75 s)")
+    ap.add_argument("--turn-timer", choices=("on", "off"), default=None,
+                    help="the game's turn timer: on (ranked's chess clock; a preset without a timer gets the game's lobby timer) "
+                         "or off; default: on for ranked, off for standard, as the game (changeable on the panel)")
     ap.add_argument("--think-until-lockin", action="store_true",
                     help="the bot keeps deepening its search until you lock in your move (after its full search, "
                          "which always finishes first); default off (changeable on the panel)")
@@ -1104,6 +1109,7 @@ def main(argv: list[str] | None = None) -> int:
                       mode="autoplay" if schedule else "human", model=bot.model,
                       pick=args.pick, show_estimate=args.show_estimate,
                       settings=args.settings, think_until_lockin=args.think_until_lockin,
+                      turn_timer=None if args.turn_timer is None else args.turn_timer == "on",
                       deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
                       engine_spec=args.engine)
     server = Server(session, args.port, args.host)

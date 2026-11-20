@@ -277,6 +277,7 @@ def popen_hidden(args, **kw) -> subprocess.Popen:
     si.wShowWindow = 0  # SW_HIDE
     kw.setdefault("creationflags", 0)
     kw["creationflags"] |= subprocess.CREATE_NO_WINDOW
+    kw.setdefault("stdin", subprocess.DEVNULL)  # a windowed parent's std handles may be invalid (WinError 6)
     proc = subprocess.Popen(args, startupinfo=si, **kw)
     threading.Thread(target=_hide_windows_of, args=(proc,), daemon=True).start()
     return proc
