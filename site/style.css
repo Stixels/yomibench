@@ -236,6 +236,29 @@ details.panel[open] > summary { margin-bottom: var(--s3); }
 .steps .cmd .iconbtn { float: right; margin: -4px -6px 4px 10px; }  /* beside the first line only; the lines below keep the full width */
 .cmd .iconbtn::after { display: none; }  /* the command box clips overflow, so its label would show as a thin sliver; the button has a native title instead */
 
+/* agent prompt: one slim bar, closed by default; the copy button works without opening it (Get started and Submit) */
+.agent { position: relative; }
+.agent details { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); }
+.agent details[open] { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+/* title | description centred on the bar | toggle; equal side columns and padding keep the middle on the bar's centre,
+   and the toggle's margin leaves room for the copy button over the right end */
+.agent summary { list-style: none; display: grid; grid-template-columns: minmax(max-content, 1fr) minmax(0, auto) minmax(max-content, 1fr);
+                 align-items: center; gap: var(--s3); padding: 10px var(--s4); min-height: 52px; cursor: pointer; }
+.agent summary::-webkit-details-marker { display: none; }
+.agent > .iconbtn { position: absolute; top: 10px; right: 10px; }
+.boticon { width: 18px; height: 18px; flex: none; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.agentt { display: flex; align-items: center; gap: var(--s3); font-weight: 600; }
+.agentd { color: var(--muted); font-size: var(--fs-sm); text-align: center; }
+.tog { justify-self: end; margin-right: 38px; font-size: var(--fs-sm); font-weight: 600; color: var(--accent-ink); white-space: nowrap; }
+.tog::after { content: " ▾"; }
+details[open] .tog::after { content: " ▴"; }
+.tog .h, details[open] .tog .s { display: none; }
+details[open] .tog .h { display: inline; }
+.agentbody { padding: 0 var(--s4) var(--s4); }
+.prompt { max-height: 18em; overflow-y: auto; }
+@media (max-width: 940px) { .agent summary { grid-template-columns: 1fr auto; } .agentd { display: none; } }
+@media (max-width: 560px) { .tog .wide { display: none; } }
+
 /* docs */
 .doc { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: var(--s5) clamp(16px, 4vw, 40px) var(--s6); }
 .doc > * { max-width: 72ch; }

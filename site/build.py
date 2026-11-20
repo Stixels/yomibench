@@ -320,8 +320,62 @@ def tile(value, name, sub="", big=False) -> str:
             f'<span class="tval">{value}</span>{f"<span class=tsub>{sub}</span>" if sub else ""}</div>')
 
 
+# Prompts a visitor pastes into a coding agent (Claude Code, Codex, Cursor...). They point the agent at the repo's
+# own guides rather than restating them, so they stay right when a command changes.
+PROMPT_START = f"""Help me train a bot for yomibench and enter it in the Arena. yomibench is an open-source bot arena \
+for the game Your Only Move Is HUSTLE: {REPO}
+
+Work from the project's own guides; don't guess commands.
+
+1. Check what I need: git, Python 3.11 or newer, uv, and the game installed through Steam (the repository's \
+docs/SETUP.md says which versions and systems work). Tell me what's missing and how to install it.
+2. Clone the repository, then change into the clone as a separate command (Windows PowerShell may not run two \
+commands joined with &&). Read README.md, docs/SETUP.md, docs/TRAINING.md and docs/SUBMIT.md.
+3. Install with `uv sync --extra train --extra test` and run the tests (`uv run pytest -q`). Tell me if anything \
+fails.
+4. Before you start training, tell me how much of my PC it will use (cores and memory) and roughly how long until \
+it promotes a first model of my own (the loop keeps going until I stop it), and wait for my go-ahead. Training runs \
+copies of the game in the background.
+5. When training has promoted a net of my own (OUT/best.json names it), help me submit it by following \
+docs/SUBMIT.md. If I started from published HustleBot weights, those weights don't count: the Arena refuses them.
+
+Explain each step in plain words. Never ask me for passwords or tokens; I'll sign in to GitHub myself."""
+
+PROMPT_SUBMIT = f"""Help me submit my yomibench bot to the Arena. Work in my clone of {REPO} (clone it if I don't \
+have one) and follow docs/SUBMIT.md exactly; don't guess commands. Run the commands below as written, with \
+`--extra net`: a fresh clone doesn't have the libraries they need.
+
+1. Find my GitHub username: the name in github.com/USERNAME. If the GitHub CLI is signed in, \
+`gh api user --jq .login` prints it. Don't use `git config user.name`; that's a display name, not the username. \
+Ask me only if you can't find it. Tell me which username you're using, and that I must open the submission form \
+signed in to GitHub as that account, or the check refuses it.
+2. Ask me for a name for my bot, like my-bot-1: 1-40 of a-z 0-9 . _ -, starting and ending with a letter or digit. \
+Before packing, check it isn't reserved or already taken (the rules are in tools/validate_submission.py; entered \
+bots are in arena/bots.json).
+3. Find my best net: the training loop names it in OUT/best.json, in its "model" field (OUT is ~/.yomibench/train \
+unless I chose another --out). It must be a net my own training promoted: if I started from published HustleBot \
+weights (--start-from), generation 1 is those weights, and the Arena refuses them. Ask me if you can't find it.
+4. Pack it: `uv run --extra net yomibench bundle pack --name BOT-NAME --owner GITHUB-USERNAME --value \
+"PATH/TO/MODEL.npz"`. Add `--policy "PATH/TO/POLICY.npz"` only if I have a policy net. This writes BOT-NAME.zip \
+in the current folder.
+5. Write entry.json, saved as UTF-8 without a BOM (Windows PowerShell adds one by default, and the check can't read \
+the file then), with: name; owner; bundle_sha256 (the sha256 of the finished zip file, lowercase, not the short \
+digest the pack command prints); candidate_set (the set my nets were trained on: the training loop's \
+--candidate-set, 6 unless I changed it; it must equal candidate_set in arena/spec.json, so tell me if it doesn't); \
+"settings": {{}}; and, if I want, notes (up to 500 characters).
+6. Run `uv run --extra net python tools/validate_submission.py entry.json BOT-NAME.zip` and fix anything it \
+reports.
+7. Then give me the submission form link ({FORM}), exactly what to paste into Bot name and Entry, and which zip to \
+drag into Bundle. Remind me to read the form's two required checkboxes and tick them only if they're true. Don't \
+open the issue yourself.
+
+Explain each step in plain words. Never ask me for passwords or tokens."""
+
+
 COPY_ICON = ('<svg viewBox="0 0 24 24" aria-hidden="true"><g class="cp"><rect x="8" y="8" width="14" height="14" rx="2"/>'
              '<path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g><path class="ok" d="M5 12l5 5L20 7"/></svg>')
+BOT_ICON = ('<svg class="boticon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="3"/>'
+            '<path d="M12 4v4M9 13h.01M15 13h.01M9 17h6"/></svg>')
 
 
 def copy_button(target: str, label: str, text: str | None = None, small: bool = False,
@@ -339,6 +393,17 @@ def copy_button(target: str, label: str, text: str | None = None, small: bool = 
 def one_line(cmd: str) -> str:
     """Commands with their `\\` line continuations joined, so they paste into PowerShell as well as a POSIX shell."""
     return re.sub(r"[ \t]*\\\n[ \t]*", " ", cmd)
+
+
+def agent_prompt(key: str, title: str, blurb: str, prompt: str) -> str:
+    """The agent prompt as one slim bar, closed by default. The copy button sits outside the <summary> (a button
+    inside one is a control within a control), positioned over the bar, so it copies without opening it."""
+    pid = f"prompt-{key}"
+    return (f'<div class="agent"><details><summary><span class="agentt">{BOT_ICON}<b>{esc(title)}</b></span>'
+            f'<span class="agentd">{esc(blurb)}</span><span class="tog"><span class="s">Show<span class="wide"> prompt'
+            f'</span></span><span class="h">Hide</span></span></summary><div class="agentbody">'
+            f'<pre class="cmd prompt" id="{pid}" tabindex="0"><code>'
+            f'{esc(prompt)}</code></pre></div></details>{copy_button(pid, "Copy prompt")}</div>')
 
 
 def meter(x) -> str:
@@ -845,7 +910,10 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
               "checks are live; rated matches open soon.", "/submit/", "How to submit",
               "uv run yomibench bundle pack \\\n  --name my-bot-1 \\\n  --owner YOUR-GITHUB-USERNAME \\\n  --value BEST_MODEL.npz")]
     body = ('<header class="pagehead"><p class="eyebrow">Get started</p><h1>Train a bot and enter it</h1><p class="lead">'
-            'Three steps from your copy of the game to a bot in the Arena.</p></header><ol class="steps">'
+            'Three steps from your copy of the game to a bot in the Arena.</p></header>'
+            + agent_prompt("start", "Prompt to get started",
+                           "A prompt that walks you through setup, training and submitting", PROMPT_START)
+            + '<ol class="steps">'
             + "".join(f'<li><h2>{esc(t)}</h2><p>{esc(d)}</p><pre class="cmd" id="step-{i}">'
                       f'{copy_button(f"step-{i}", "Copy commands", one_line(c), small=True)}<code>{esc(c)}</code></pre>'
                       f'<a class="more" href="{L(h)}">{esc(lk)} →</a></li>'
@@ -902,7 +970,9 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
                    f'</span></div><a class="button" href="{FORM}">Open the submission form</a></div>'
                    '<div class="tiles">' + tile("Data only", "Phase 1", "value nets in our search, never code")
                    + tile("Same budget", "Every bot", "fixed ranked settings")
-                   + tile("Automatic", "Checks", "size, contents, a test position") + "</div>")
+                   + tile("Automatic", "Checks", "size, contents, a test position") + "</div>"
+                   + agent_prompt("submit", "Prompt to submit",
+                                  "A prompt to help pack, check, and submit your trained bot", PROMPT_SUBMIT))
         if path == "/get-started/setup/":
             top = f'<nav class="crumbs"><a href="{L("/get-started/")}">← Get started</a></nav>'
         sub = subnav(path) if sections[path] == "lab" else ""
