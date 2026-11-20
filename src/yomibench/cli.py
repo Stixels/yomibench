@@ -126,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--full-previews-fraction", type=float, default=0.01, metavar="F",
                     help="share of games that keep each turn's previewed states (most of a record's size), chosen "
                          "per game from its seed; the rest are slim, with everything training reads (default 0.01)")
+    sp.add_argument("--batched-net-forward", action="store_true",
+                    help="batch engine: score both seats' views of a preview batch in one value-net forward "
+                         "(faster; NOT bit-identical to the default two forwards, so search can pick differently; "
+                         "bots record value_forward: batched). Default off")
     sp.add_argument("--no-previews", action="store_true",
                     help="no game keeps previewed states: the same as --full-previews-fraction 0")
     sp.add_argument("--full-previews-max-pairs", type=int, default=20000, metavar="N",
@@ -163,6 +167,15 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--least-tried-counts", type=Path, metavar="PATH",
                     help="the counts file --explore-least-tried reads (least_tried.refresh_counts / write_counts; "
                          "the round-3 worker writes one per chunk); its sha256 goes into every record's header")
+    sp.add_argument("--sampled-starts", default="", metavar="JSON",
+                    help="sampled-state starts (yomibench.sampled_starts), e.g. '{\"share\": 0.1, \"window_hours\": 12}': "
+                         "a seeded share of game pairs (seeds 2m, 2m+1) start from a state sampled from the "
+                         "--sampled-starts-pool records written in the last window_hours whose engine rules and match "
+                         "settings are this engine's (fast_forward, checked against the record's state; on a mismatch "
+                         "the game plays from the opening). Header start.kind sampled. Default off")
+    sp.add_argument("--sampled-starts-pool", type=Path, action="append", default=[], metavar="DIR",
+                    help="a folder of source records for --sampled-starts (repeatable; the round-3 worker passes its "
+                         "DATA_ROOT/start-pool)")
     sp.add_argument("--factor-margin", type=float, default=0.02, metavar="M",
                     help="set 4: also refine factors of off-support candidates within M of the game value")
     sp.add_argument("--factor-random", type=int, default=2, metavar="K",
@@ -250,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
             p.error("--full-previews-max-pairs must be nonnegative")
         if args.explore_least_tried:
             _least_tried(args)  # checks the settings and the counts file before any child starts
+        try:
+            _sampled_starts(args)  # checks the settings before any child starts
+        except ValueError as e:
+            p.error(f"--sampled-starts: {e}")
     if args.cmd == "selfplay":
         import time
 
@@ -330,7 +347,8 @@ def main(argv: list[str] | None = None) -> int:
 
             connects, bot_factory = batch_selfplay_parts(specs, bot_factory, args.max_candidates,
                                                          _previews_fraction(args), args.candidate_set,
-                                                         args.full_previews_max_pairs, args.match_settings)
+                                                         args.full_previews_max_pairs, args.match_settings,
+                                                         batched_net_forward=args.batched_net_forward)
         try:
             written, dropped = run_selfplay(
                 connects, bot_factory, matchups,
@@ -346,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
                 full_previews_max_pairs=args.full_previews_max_pairs,
                 explore_least_tried=_least_tried(args),
                 claim=claim, owns=owns, playing=cap.playing if cap else None, guard=cap.lock if cap else None,
+                **({"sampled_starts": pool} if (pool := _sampled_starts(args)) is not None else {}),
             )
         except KeyboardInterrupt:
             print("interrupted; finished games are kept, rerun the same command to resume", flush=True)
@@ -356,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
         mins = (time.perf_counter() - t0) / 60
         print(f"{written} games written, {dropped} dropped, {mins:.1f} min "
               f"({written / max(mins, 1e-9) * 60:.0f} games/hour on {len(specs)} engines)")
+        if stats.get("sampled_starts"):
+            s = stats["sampled_starts"]
+            print("sampled starts: " + ", ".join(f"{k} {v}" for k, v in s.items()), flush=True)
         return 0
     if args.cmd == "render":
         from yomibench.render import render
@@ -524,6 +546,19 @@ def _seed_claimer(claim_dir: Path):
         except FileExistsError:
             return False
     return claim
+
+
+def _sampled_starts(args):
+    """--sampled-starts as a sampled_starts.StartPool over --sampled-starts-pool; None when off.
+    ValueError for invalid settings, or settings without a pool folder."""
+    from yomibench import sampled_starts
+
+    settings = sampled_starts.parse_settings(args.sampled_starts)
+    if settings is None:
+        return None
+    if not args.sampled_starts_pool:
+        raise ValueError("needs --sampled-starts-pool DIR")
+    return sampled_starts.StartPool(settings, args.sampled_starts_pool)
 
 
 def _least_tried(args):

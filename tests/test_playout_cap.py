@@ -475,3 +475,39 @@ def test_options_shuffle_games_are_deterministic_and_their_picks_step_as_preview
 def test_a_game_with_the_policy_off_is_bit_identical_to_todays():
     strip = lambda lines: [{k: v for k, v in ln.items() if k not in ("ms", "started", "perf")} for ln in lines]  # noqa: E731
     assert strip(_game(5, (0.5, 3))[:-1]) == strip(_game(5, (0.5, 3, "list"))[:-1])
+
+
+def test_frozen_keys_equal_exactly_when_json_strings_do():
+    """The cap policies' option keys (`_frozen`) group values exactly as their sorted-key JSON strings do:
+    True / 1 / 1.0 and -0.0 / 0.0 stay apart, NaN equals NaN, dict order doesn't count."""
+    import random as _random
+
+    from yomibench.playout import _frozen
+
+    rng = _random.Random(7)
+    atoms = [None, True, False, 0, 1, -1, 0.0, -0.0, 1.0, 0.5, float("nan"), "", "a", "1", "true", "x\u00e9"]
+
+    def value(depth=0):
+        r = rng.random()
+        if depth < 3 and r < 0.2:
+            return [value(depth + 1) for _ in range(rng.randrange(3))]
+        if depth < 3 and r < 0.4:
+            ks = rng.sample(["x", "y", "id", "name", "count"], rng.randrange(4))
+            return {k: value(depth + 1) for k in ks}
+        return rng.choice(atoms)
+    vals = [value() for _ in range(3000)]
+    for _ in range(40000):
+        a, b = rng.choice(vals), rng.choice(vals)
+        assert (_frozen(a) == _frozen(b)) == (json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)), (a, b)
+    assert _frozen({"x": 1, "y": 2}) == _frozen({"y": 2, "x": 1})
+
+
+def test_option_tuples_group_as_option_keys_strings():
+    from yomibench.playout import _option_tuples, option_keys
+
+    cands = _seat_list() + [Candidate(40, "Flag", {"on": True}, None), Candidate(41, "Flag", {"on": "true"}, None),
+                            Candidate(42, "Flag", {"on": None}, None), Candidate(43, "Flag", {"on": True}, None)]
+    strings, (keys, _) = option_keys(cands), _option_tuples(cands)
+    for i in range(len(cands)):
+        for j in range(len(cands)):
+            assert (strings[i] == strings[j]) == (keys[i] == keys[j])

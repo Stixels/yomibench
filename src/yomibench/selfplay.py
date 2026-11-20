@@ -9,7 +9,7 @@ changes (`candidate_set` in the header says which list they index). Layout of a 
      "solver": "native" | "python", "previews": "slim" | "full",
      "full_previews_fraction": F | null,
      "playout_cap": {"cheap_fraction", "cheap_cap", "cheap_cap_policy"?} | null,
-     "full_previews_max_pairs": N?, "yomibench": git rev, ...}                        header
+     "full_previews_max_pairs": N?, "start": {"kind": "sampled", ...}?, "yomibench": git rev, ...}  header
     {"turn": ..., "state": ..., "actionable": ..., "candidates": [[...], [...]],
      "strategies": [[...], [...]] | null, "value": v_p1 | null,
      "candidate_values": [[...], [...]] | null, "previews": n,
@@ -44,6 +44,11 @@ noise) unless `explore_mode` says otherwise (`"softmax"`: sampled from a low-tem
 of `replies`, near the policy). A `"least-tried"` pick (yomibench.least_tried) also carries
 `explore_pick`: {"kind": "least-tried", "seat", "move_type", "options", "counts_at_pick", "matched", "of"}.
 
+A header with `start` (yomibench.sampled_starts) is a sampled-start game: it began at decision `start.k`
+of another record (`source_seed`, `source_sha256`, the picks to get there in `prefix_inputs`), so its
+first row is decision k, not the opening (the true decision index of row r is k + r). Games from the
+opening have no `start`.
+
 Playout cap randomization (KataGo's; `play_recorded`'s `playout_cap=(P, N)`, header
 `playout_cap`): each decision is cheap with probability P, drawn from the match seed and turn
 alone (`cheap_turn`), otherwise full. A cheap decision searches only `cap_candidates(N)` of each
@@ -77,11 +82,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple
 
+from yomibench import phases
 from yomibench.bots import opening_weights, softmax_weights, turn_candidates
 from yomibench.playout import cap_candidates, cheap_turn  # noqa: F401  (selfplay's names too)
 from yomibench.engine import Engine, EngineCrashed, EngineError, Observation
 from yomibench.ledger import add_selfplay_counts
 from yomibench.least_tried import LeastTried
+from yomibench.sampled_starts import SKIPS as SAMPLED_SKIPS
+from yomibench.sampled_starts import begin as begin_sampled
 from yomibench.search import SOLVER
 
 # Category exploration (the draw arm): with probability E per eligible full-turn
@@ -163,8 +171,14 @@ def play_recorded(engine: Engine, bot: Any, characters: tuple[str, str], seed: i
                   explore_category: tuple[str, float] | None = None,
                   explore_uniform_moves: float | None = None,
                   full_previews_max_pairs: int = 0,
-                  explore_least_tried: LeastTried | None = None) -> list[dict[str, Any]]:
+                  explore_least_tried: LeastTried | None = None,
+                  sampled_start: tuple[Any, Observation] | None = None) -> list[dict[str, Any]]:
     """One self-play game of `bot` against itself; returns the record's lines.
+
+    `sampled_start=(sampled_starts.Start, observation)`: the game begins where `sampled_starts.begin` put the
+    engine (`observation`, decision k of a source record) instead of a new match: the header carries
+    `start` (Start.header), the rows begin at decision k, the first row's state carries the match's
+    `raw_start`, and there is no opening window (decision k is past it). None: from the opening, as before.
 
     `bot.search_turn(obs, engine)` solves the turn once for both seats; each pick is sampled from
     that seat's certified strategy, the way the bot plays. A turn where neither seat
@@ -242,13 +256,20 @@ def play_recorded(engine: Engine, bot: Any, characters: tuple[str, str], seed: i
         lines[0]["explore_least_tried"] = explore_least_tried.header(least is not None)
     if full_previews_max_pairs:
         lines[0]["full_previews_max_pairs"] = full_previews_max_pairs
+    if sampled_start is not None:
+        lines[0]["start"] = sampled_start[0].header()
     div0 = _divergence(engine)
     if out is not None:
         out.write(lines[0])
     engine_stats = getattr(engine, "stats", {})
     engine_stats["max_preview_pairs"] = 0  # this game's largest preview request (Engine.stats)
-    obs = engine.new_match(characters[0], characters[1], seed, max_candidates)
-    decisions = [0, 0]  # each seat's decisions with a real choice so far (opening window)
+    if sampled_start is None:
+        obs = engine.new_match(characters[0], characters[1], seed, max_candidates)
+        decisions = [0, 0]  # each seat's decisions with a real choice so far (opening window)
+    else:  # a sampled start: the engine already stands at decision k, past any opening window
+        obs = sampled_start[1]
+        decisions = [opening[0], opening[0]] if opening else [0, 0]
+    raw_start = sampled_start[0].raw_start if sampled_start is not None else None
     # `fallback_turns`: turns where matrix-do's double oracle didn't converge and it solved the whole
     # (kept) table (the record's `oracle.fallback`); `max_preview_pairs`: the largest preview request.
     perf = {"decisions": 0, "searched": 0, "previews": 0, "preview_pairs": 0, "preview_ms": 0.0, "search_ms": 0.0,
@@ -267,6 +288,10 @@ def play_recorded(engine: Engine, bot: Any, characters: tuple[str, str], seed: i
     while not obs.done and obs.turn < max_turns:
         t = time.perf_counter()
         line: dict[str, Any] = {"turn": obs.turn, "state": obs.state, "actionable": list(obs.actionable)}
+        if raw_start is not None:  # a sampled start's first row: the match's start values, as an opening row has
+            if "raw_start" not in obs.state:
+                line["state"] = {**obs.state, "raw_start": raw_start}
+            raw_start = None
         cheap = bool(playout_cap) and cheap_turn(seed, obs.turn, playout_cap[0])
         if playout_cap:
             line["search"] = "cheap" if cheap else "full"
@@ -372,7 +397,9 @@ def play_recorded(engine: Engine, bot: Any, characters: tuple[str, str], seed: i
             out.write(line)
         else:
             lines.append(line)
+        t_step = time.perf_counter()
         obs = engine.step(cands[0][picks[0]].id, cands[1][picks[1]].id)
+        phases.add("step", time.perf_counter() - t_step)  # timing only (the ledger's step_ms)
     perf["max_preview_pairs"] = engine_stats.get("max_preview_pairs", 0)
     # A game cut off by max_turns has no result; "truncated" keeps it out of outcome targets.
     if not obs.done:
@@ -407,12 +434,16 @@ class RecordWriter:
         self.sha = hashlib.sha1()
 
     def write(self, line: dict[str, Any]) -> None:
+        t = time.perf_counter()
         b = json.dumps(line, separators=(",", ":")).encode() + b"\n"
         self.sha.update(b)
         self.f.write(b)
+        phases.add("record", time.perf_counter() - t)  # timing only (the ledger's record_ms)
 
     def finish(self) -> Path:
+        t = time.perf_counter()
         self.f.close()
+        phases.add("record", time.perf_counter() - t)
         path = self.out_dir / f"{self.stem}-{self.sha.hexdigest()[:12]}.jsonl.gz"
         os.replace(self.tmp, path)
         return path
@@ -636,6 +667,16 @@ def fallback_counts(paths: Iterable[Path]) -> dict[str, dict[str, int]]:
     return out
 
 
+def _count_sampled(stats: dict[str, Any] | None, why: str | None) -> None:
+    """One sampled slot in stats["sampled_starts"]: started from its sampled state (`why` None), or
+    played from the opening for `why` (sampled_starts.SKIPS)."""
+    if stats is None:
+        return
+    c = stats.setdefault("sampled_starts", {"slots": 0, "games": 0, **{k: 0 for k in SAMPLED_SKIPS}})
+    c["slots"] += 1
+    c["games" if why is None else why] = c.get("games" if why is None else why, 0) + 1
+
+
 def run_selfplay(
     connects: list[Callable[[], Engine]],
     bot_factory: Callable[[], Any],
@@ -657,6 +698,7 @@ def run_selfplay(
     owns: Callable[[int], bool] | None = None,
     playing: dict[int, Any] | None = None,
     guard: Any = None,
+    sampled_starts: Any = None,
 ) -> tuple[int, int]:
     """Play every seed not already recorded in `out_dir`, one worker thread per engine. Game `seed`
     uses `characters[seed % len(characters)]`. Returns (games written, games dropped). Records are
@@ -668,7 +710,12 @@ def run_selfplay(
     this process's share, so merged counters count each skipped seed once.
     `playing` (seed -> matchup of each game in play, kept here) and `guard` (the lock this run's
     bookkeeping takes) come from a memcap.MemoryCap, which takes `guard` for good before it ends
-    the process: no game is then claimed, recorded or counted unseen."""
+    the process: no game is then claimed, recorded or counted unseen.
+    `sampled_starts` (a sampled_starts.StartPool; None: off, every game from the opening as before): the
+    pool's seeded share of game pairs start from a state sampled from its records (sampled_starts module
+    docstring), playing the source's characters; `stats["sampled_starts"]` counts the sampled slots
+    ("slots"), the games started so ("games") and the slots that played from the opening instead, by
+    reason (sampled_starts.SKIPS)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     _remove_stale_temp_files(out_dir)
     have = done_seeds(out_dir)
@@ -714,8 +761,20 @@ def run_selfplay(
                 if not taken:
                     continue  # another process took it
                 chars = characters[seed % len(characters)]
+                phase0 = dict(phases.totals())  # this thread's phase times before the game (ledger timings)
                 writer = RecordWriter(out_dir, seed)
                 try:
+                    start = None
+                    if sampled_starts is not None:
+                        sampled_starts.bind(hello)
+                        source, why = sampled_starts.pick(seed)
+                        if source is not None:
+                            obs0, why = begin_sampled(engine, source, seed, max_candidates)
+                            if obs0 is not None:
+                                start, chars = (source, obs0), source.characters
+                        if source is not None or why is not None:
+                            with lock:
+                                _count_sampled(stats, why)
                     full = full_previews(seed, full_previews_fraction)
                     lines = play_recorded(engine, bot, chars, seed, hello, max_candidates=max_candidates,
                                           full_previews=full, out=writer, opening=opening,
@@ -723,7 +782,8 @@ def run_selfplay(
                                           playout_cap=playout_cap, explore_category=explore_category,
                                           explore_uniform_moves=explore_uniform_moves,
                                           full_previews_max_pairs=full_previews_max_pairs,
-                                          explore_least_tried=explore_least_tried)
+                                          explore_least_tried=explore_least_tried,
+                                          **({"sampled_start": start} if start is not None else {}))
                 except BaseException as e:
                     writer.abort()
                     if not isinstance(e, (EngineCrashed, EngineError)):
@@ -750,6 +810,9 @@ def run_selfplay(
                     counts[0] += 1
                     if stats is not None:
                         _add_game_stats(stats, lines[-1]["result"], chars)
+                        # Per-phase timings (net, solve, expand, step, record ms): stats only, never the record.
+                        add_selfplay_counts(stats, {f"{k}_ms": (v - phase0[k]) * 1000
+                                                    for k, v in phases.totals().items()})
                         kind = "full" if full else "slim"  # compressed bytes, by kind of record
                         stats[f"bytes_{kind}"] = stats.get(f"bytes_{kind}", 0) + path.stat().st_size
                         stats[f"games_{kind}"] = stats.get(f"games_{kind}", 0) + 1

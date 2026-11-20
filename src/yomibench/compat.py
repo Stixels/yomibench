@@ -246,6 +246,26 @@ def apply_record_filter(chunks: dict[str, list[Any]], keys_of: Any, record_filte
     return summary
 
 
+def excludes_sampled_starts(record_filter: dict[str, Any] | None, flag: bool = False) -> bool:
+    """Whether a window leaves sampled-start records out: train --exclude-sampled-starts, or the record
+    filter's "exclude_sampled_starts": true."""
+    return bool(flag or (record_filter or {}).get("exclude_sampled_starts"))
+
+
+def drop_sampled_starts(chunks: dict[str, list[Any]], sampled_of: Any, log: Any = print) -> dict[str, Any]:
+    """Drop sampled-start records (yomibench.sampled_starts: rows beginning mid-game; `sampled_of(path)`
+    says which) from every split of `chunks`, in place, e.g. for a holdout that must hold only games from
+    the opening. Returns {"excluded": {split: n}, "excluded_total": n}, logged."""
+    excluded: dict[str, int] = {}
+    for split, files in chunks.items():
+        keep = [f for f in files if not sampled_of(f)]
+        excluded[split] = len(files) - len(keep)
+        files[:] = keep
+    out = {"excluded": excluded, "excluded_total": sum(excluded.values())}
+    log("sampled starts excluded: " + ", ".join(f"{k} {n}" for k, n in excluded.items()))
+    return out
+
+
 # --- held-out human tests ------------------------------------------------------------------------
 # Human-vs-bot games (yomibench.human_play) are a held-out human test: they
 # never enter training or a gate's game set. Their records say so in the header (`arm`), and the

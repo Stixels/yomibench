@@ -151,6 +151,14 @@ no game changes split: the frozen held-out set stays whole, so validation MSE co
 One line per fit logs the counts (recent kept, older sampled of the older, total, by candidate set
 and by ceiling); the meta and the ledger row record them under `sample_window`. With the cache,
 the dropped games' rows are never read: only the kept games' row ranges enter the splits.
+
+Shared window (`--share-window DIR`, off by default; cached loader only): the selected window is
+written under DIR, keyed by the data arguments, and a later run with the same ones reads it instead
+of selecting again while the records are unchanged, training exactly the same model
+(yomibench.cache, "Shared windows"); `--share-window-frozen` also reuses it after games arrived.
+`shared_window` (meta and ledger) says whether the window was written or read; the ledger row's
+`phase_seconds` then has `share_import` (and `share_export` when written), and a run that read the
+window has no `window_select`, `row_select` or vocab pass of its own (its `vocab` is the lookup table).
 """
 
 from __future__ import annotations
@@ -182,6 +190,7 @@ from yomibench import compat, evalset, heldout, ledger
 from yomibench.compat import check_keys, record_keys  # noqa: F401  (record_keys: public here)
 from yomibench.features import CATEGORY_OF_SLOT, CHARACTERS, N_CATEGORICAL, N_NUMERIC, NUMERIC_NAMES, Vocab, encode
 from yomibench.policy import CAND_CATEGORIES, EMBED as CEMBED, N_CAND, X_COLUMNS, flip_columns
+from yomibench.sampled_starts import is_sampled, start_offset
 from yomibench.search import evaluate
 from yomibench.search_record import DEFAULT_K, CandTable, SplitCands, finish_table, turn_candidates
 from yomibench.selfplay import final_hp_margin, read_header, read_slim, uniform_explore
@@ -322,7 +331,8 @@ def load_samples(dirs: list[Path], vocab: Vocab, val_fraction: float, seed: int,
                  heldout_seed: int = 0, quick_turns: dict[str, Any] | None = None,
                  record_filter: dict[str, Any] | None = None,
                  allow_match_settings: list[dict[str, Any]] | None = None,
-                 cand_k: int | None = None, window: dict[str, Any] | None = None) -> dict[str, Any]:
+                 cand_k: int | None = None, window: dict[str, Any] | None = None,
+                 exclude_sampled_starts: bool = False) -> dict[str, Any]:
     """One sample per recorded decision: the state encoded from both seats' views and p1's final
     result (+1, -1, 0). The model's value for p1 is (f(p1 view) - f(p2 view)) / 2, antisymmetric by
     construction, so p2's value is exactly its negative (the search relies on that).
@@ -368,7 +378,12 @@ def load_samples(dirs: list[Path], vocab: Vocab, val_fraction: float, seed: int,
 
     `window` ({"recent_hours", "budget", "seed"}: train --window-budget-games): after the record
     filter, the training games are cut by sample_window (time: each file's mtime); `sample_window` in
-    the result has its settings and counts. Without it nothing changes."""
+    the result has its settings and counts. Without it nothing changes.
+
+    `exclude_sampled_starts` (or the record filter's "exclude_sampled_starts": true): sampled-start
+    records (yomibench.sampled_starts) are left out of every split, counted in `sampled_starts_excluded`.
+    Without it they are read like any record, at weight 1, their rows' phases from their true decision
+    index (select_rows' offset)."""
     explore_cutoffs([], explore_targets)  # validates the setting before any work
     if gen_weights is not None and len(gen_weights) != len(dirs):
         raise SystemExit(f"{len(gen_weights)} generation weights for {len(dirs)} folders")
@@ -391,6 +406,12 @@ def load_samples(dirs: list[Path], vocab: Vocab, val_fraction: float, seed: int,
         (lambda chunk, fn=read_slim: map(fn, chunk))
     try:
         headers = list(load(files, read_header))
+        if compat.excludes_sampled_starts(record_filter, exclude_sampled_starts):
+            by_file = dict(zip(files, headers))
+            out["sampled_starts_excluded"] = compat.drop_sampled_starts(chunks, lambda f: is_sampled(by_file[f]),
+                                                                        partial(print, flush=True))
+            files = [p for c in chunks.values() for p in c]
+            headers = [by_file[p] for p in files]
         if record_filter:
             by_file = dict(zip(files, headers))
             out["record_filter"] = compat.apply_record_filter(chunks, lambda f: compat.record_keys(by_file[f]),
@@ -595,7 +616,8 @@ def aux_search_targets(turns: list[Any], offsets: list[int] | tuple[int, ...],
 def select_rows(turns: list[Any], split: str, explore_targets: str, value_weight: float, z: float,
                 cheap_target: str = "outcome", cheap_value_weight: float | None = None,
                 full_turns_only: bool = False, target_nstep: int | None = None,
-                target_lambda: float | None = None, aux_offsets: list[int] | tuple[int, ...] = ()):
+                target_lambda: float | None = None, aux_offsets: list[int] | tuple[int, ...] = (),
+                offset: int = 0):
     """One game's samples for a split (load_samples; the training cache shares it): [(turn index,
     target y, phase)] plus the counts load_samples reports. Needs only each turn's `value`,
     `explore`, `explore_mode` and `cheap`. Validation and evaluation drop the positions at or before
@@ -614,7 +636,12 @@ def select_rows(turns: list[Any], split: str, explore_targets: str, value_weight
     pick (window_stops). The value-only stretch before a pick trains on that mean too.
 
     `aux_offsets` (every split): the result's counts also hold "aux", one tuple per row of
-    aux_search_targets for those offsets."""
+    aux_search_targets for those offsets.
+
+    `offset`: the true decision index of the game's first recorded turn (sampled_starts.start_offset:
+    a sampled-start record begins at decision k, not at the opening). A row's phase is its true index
+    over the game's true length, (offset + k) / (offset + len(turns)); 0 (games from the opening) is
+    the row index over the record's turns, as before. Targets and cutoffs don't depend on it."""
     target_cut, val_cut = explore_cutoffs(turns, explore_targets)
     if cheap_target not in CHEAP_TARGETS:
         raise ValueError(f"cheap_target must be one of {CHEAP_TARGETS}, not {cheap_target!r}")
@@ -646,7 +673,7 @@ def select_rows(turns: list[Any], split: str, explore_targets: str, value_weight
             w = value_weight if cheap_value_weight is None else cheap_value_weight
         else:
             value = None
-        phase = k / max(1, len(turns))
+        phase = (offset + k) / max(1, offset + len(turns))
         blend = (1 - w) * z + w * (z if value is None else value)
         if split != "train":
             if k <= val_cut:
@@ -704,7 +731,8 @@ def _load_split(split, chunk, load, gen_of, n_gens, weights, vocab, value_weight
         z = 0.0 if result["winner"] is None else (1.0 if result["winner"] == 0 else -1.0)
         margin = final_hp_margin(result, turns[0].state if turns else None)
         # Value-only targets up to the target cutoff; validation drops up to its own cutoff.
-        rows, counts = select_rows(turns, split, explore_targets, value_weight, z, **(quick_turns or {}))
+        rows, counts = select_rows(turns, split, explore_targets, value_weight, z, **(quick_turns or {}),
+                                   offset=start_offset(header))
         mu = matchup_code(header.get("characters", ()))
         explored += counts["explored"]
         value_only += counts["value_only"]
@@ -1137,6 +1165,8 @@ def dry_run(args: argparse.Namespace) -> None:
     files = [p for c in chunks.values() for p in c]
     by_file = {p: read_header(p) for p in files}
     allow = args.allow_match_settings
+    if compat.excludes_sampled_starts(args.record_filter, args.exclude_sampled_starts):
+        compat.drop_sampled_starts(chunks, lambda f: is_sampled(by_file[f]), partial(print, flush=True))
     compat.apply_record_filter(chunks, lambda f: compat.record_keys(by_file[f]), args.record_filter,
                                **({"allow_match_settings": allow} if allow else {}))
     if args.window_budget_games is not None:
@@ -1223,6 +1253,11 @@ def main(argv: list[str] | None = None) -> None:
                          '"candidate_sets": ["5", "6"] (other sets kept too; needs --allow-mixed-candidate-sets); the rest are '
                          'excluded and counted (yomibench.compat.apply_record_filter). The round-3 trainer passes it '
                          'once the fleet manifest pins match settings or a candidate set')
+    ap.add_argument("--exclude-sampled-starts", action="store_true",
+                    help="leave sampled-start records (header start.kind sampled: self-play games begun mid-game "
+                         "from a recent record's state, yomibench.sampled_starts) out of every split, e.g. when "
+                         "building or scoring a holdout that must hold games from the opening only; the record "
+                         "filter's \"exclude_sampled_starts\": true does the same. Default: they train at weight 1")
     ap.add_argument("--allow-match-settings", default=None, metavar="JSON-LIST",
                     help='match-settings variants that may share the window (and pass --record-filter), e.g. '
                          '\'[{"ceiling_height": 800}, {"ceiling_height": 500, "has_ceiling": true}]\': a setting any '
@@ -1278,6 +1313,13 @@ def main(argv: list[str] | None = None) -> None:
                          "game (default 0: a uniform sample of the whole window)")
     ap.add_argument("--window-seed", type=int, default=0, metavar="S",
                     help="with --window-budget-games: the older games' sample (default 0)")
+    ap.add_argument("--share-window", type=Path, default=None, metavar="DIR",
+                    help="shared window (cached loader only; off by default): reuse the selected window another run "
+                         "with the same data arguments wrote under DIR when the records are unchanged, else select as "
+                         "usual and write it there; see 'Shared windows' in the module docstring")
+    ap.add_argument("--share-window-frozen", action="store_true",
+                    help="with --share-window: also reuse a window written before games arrived (its games' cache "
+                         "entries unchanged); this run then trains on that window, not on the newer games")
     ledger.add_args(ap)
     args = ap.parse_args(argv)
     if args.allow_match_settings is not None:
@@ -1300,6 +1342,10 @@ def main(argv: list[str] | None = None) -> None:
                   "seed": args.window_seed}
     elif args.window_recent_hours or args.window_seed:
         ap.error("--window-recent-hours and --window-seed need --window-budget-games")
+    if args.share_window is not None and args.in_memory:
+        ap.error("--share-window shares the cached loader's window; --in-memory has none")
+    if args.share_window_frozen and args.share_window is None:
+        ap.error("--share-window-frozen needs --share-window")
     if args.aux_hp_weight < 0:
         ap.error("--aux-hp-weight must be nonnegative")
     if args.full_turns_only and args.cheap_target != "outcome":
@@ -1364,7 +1410,8 @@ def main(argv: list[str] | None = None) -> None:
                                 args.eval_dir, args.heldout_root, args.heldout_seed, quick_turns=targets,
                                 record_filter=args.record_filter,
                                 **({"allow_match_settings": args.allow_match_settings} if args.allow_match_settings else {}),
-                                **({"cand_k": cand_k} if cand_k else {}), **({"window": window} if window else {}))
+                                **({"cand_k": cand_k} if cand_k else {}), **({"window": window} if window else {}),
+                                **({"exclude_sampled_starts": True} if args.exclude_sampled_starts else {}))
     else:  # the same splits and rows from yomibench.cache, input columns memory-mapped
         from yomibench.cache import open_cached
 
@@ -1374,7 +1421,8 @@ def main(argv: list[str] | None = None) -> None:
                            hp_margin=args.aux_hp_weight > 0, quick_turns=targets, record_filter=args.record_filter,
                            **({"allow_match_settings": args.allow_match_settings} if args.allow_match_settings else {}),
                            **({"cand_k": cand_k} if cand_k else {}), **({"window": window} if window else {}),
-                           phases=phases)
+                           **({"exclude_sampled_starts": True} if args.exclude_sampled_starts else {}),
+                           phases=phases, share_dir=args.share_window, share_frozen=args.share_window_frozen)
     tr, va, ev = data["train"], data["val"], data["eval"]
     load_s = time.perf_counter() - t_load
     print(f"train: {tr['games']} games, {len(tr['y'])} samples; val (held out): {va['games']} games, "
@@ -1548,6 +1596,7 @@ def main(argv: list[str] | None = None) -> None:
         "heldout": {d: {"manifest": m["manifest"], "sha256": m["sha256"]} for d, m in data["heldout"].items()},
         **({"record_filter": data["record_filter"]} if data.get("record_filter") else {}),
         **({"sample_window": data["sample_window"]} if data.get("sample_window") else {}),
+        **({"shared_window": data["shared_window"]} if data.get("shared_window") else {}),
     })
 
     def saved_values(split):  # p1's values from the saved model, as play computes them
@@ -1613,12 +1662,14 @@ def main(argv: list[str] | None = None) -> None:
     if ledger_path:
         _append_ledger(args, ledger_path, tags, started, cpu, memory, tr, va, len(t["y"]), load_s, train_s, device,
                        best, kept, pred if len(va["y"]) else None, given_dirs, gen_weights, ev, pred_e,
-                       data["heldout"], data.get("sample_window"), phases.rounded())
+                       data["heldout"], data.get("sample_window"), phases.rounded(), data.get("shared_window"))
 
 
 def _append_ledger(args, path, tags, started, cpu, memory, tr, va, n_train, load_s, train_s, device, best, kept,
-                   pred, given_dirs, gen_weights, ev, pred_e, manifests, window=None, phase_seconds=None) -> None:
-    """One `train` row for the metrics ledger (yomibench.ledger); never fails the run."""
+                   pred, given_dirs, gen_weights, ev, pred_e, manifests, window=None, phase_seconds=None,
+                   shared_window=None) -> None:
+    """One `train` row for the metrics ledger (yomibench.ledger); never fails the run. `shared_window`:
+    what --share-window did (yomibench.cache open_cached), when given."""
     try:
         from yomibench.valuenet import FEATURES
 
@@ -1674,6 +1725,8 @@ def _append_ledger(args, path, tags, started, cpu, memory, tr, va, n_train, load
         }
         if window:  # the sample window's settings and counts
             metrics["sample_window"] = window
+        if shared_window:  # --share-window: the window written or read (mode, folder)
+            metrics["shared_window"] = shared_window
         if args.allow_match_settings:  # the allow-list used, and validation per variant
             metrics["allow_match_settings"] = args.allow_match_settings
             metrics["val_mse_by_match_settings"] = variant_mse(va, pred, args.allow_match_settings)
@@ -1683,7 +1736,8 @@ def _append_ledger(args, path, tags, started, cpu, memory, tr, va, n_train, load
                 [*map(compat.variant_label, args.allow_match_settings), "other"], tr.get("variant_games") or []))
         skip = ("ledger", "no_ledger", "tag", "owner", "log") + (() if args.allow_match_settings else
                                                                 ("allow_match_settings",)) \
-            + (() if window else ("window_budget_games", "window_recent_hours", "window_seed"))
+            + (() if window else ("window_budget_games", "window_recent_hours", "window_seed")) \
+            + (() if args.share_window else ("share_window", "share_window_frozen"))
         prov = ledger.provenance(
             settings={k: v for k, v in vars(args).items() if k not in skip}, started_utc=started, load=cpu,
             owner=args.owner, device=device, engine=ledger.header_engine(args.dirs),

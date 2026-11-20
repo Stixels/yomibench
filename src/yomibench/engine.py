@@ -245,6 +245,17 @@ class Engine:
         self.turn_cache = {}
         return Observation.parse(self._call({"cmd": "step", "actions": [a1, a2]}))
 
+    def fast_forward(self, inputs: list[list[dict[str, Any]]], seed: int | None = None) -> Observation:
+        """Sampled-state starts (yomibench.sampled_starts): from the current match's opening, play each
+        decision's recorded P1 and P2 candidates (dicts as records keep them) in order, standing at the
+        decision after the last; the observation there. `seed` (the game's own) then keys the match's
+        per-match randomness on our side (`match_seed`), the restored state keeping the source's."""
+        self.turn_cache = {}
+        resp = self._call({"cmd": "fast_forward", "inputs": inputs})
+        if seed is not None:
+            self.match_seed = seed
+        return Observation.parse(resp) if "state" in resp else self.observe()
+
     def step_raw(self, inputs: list[dict[str, Any]]) -> Observation:
         """Engines that follow recorded games only: play P1's and P2's inputs ({action, data, extra} each) exactly as given,
         on or off the candidate grid, and answer like `step` (human play follows a real game)."""

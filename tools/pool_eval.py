@@ -859,6 +859,9 @@ def main(argv=None):
                          '--procs children and --shard runs write theirs too); decisions are unchanged')
     ledger.add_args(ap)
     argv = list(sys.argv[1:] if argv is None else argv)
+    if any(str(a).startswith('--sampled-starts') for a in (sys.argv[1:] if argv is None else argv)):
+        # Gates, screens and the control always play from the opening (yomibench.sampled_starts is self-play only).
+        ap.error('--sampled-starts is self-play only: gates, screens and the control never use sampled starts')
     args = ap.parse_args(argv)
     if args.set5:  # canonical text (the schedule keeps it); the engines read $YOMISIM_SET5
         try:
