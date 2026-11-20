@@ -1,3 +1,7 @@
+# This machine's settings (yomibench.localconfig): never committed
+yomibench.local.toml
+.yomibench/
+
 # Python
 .venv/
 __pycache__/

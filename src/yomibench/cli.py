@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("selfplay", help="record self-play games for training (one .jsonl.gz per game)")
     sp.add_argument("--engine", default="toy",
                     help="same forms as arena --engine, or batch[:THREADS] (the sim's native Batch API; see "
-                         "yomibench.batch_play; it plays --candidate-set like sim); one game at a time per spec")
+                         "the batch plugin; it plays --candidate-set like sim); one game at a time per spec")
     sp.add_argument("--bot", default="matrix-do",
                     help="matrix-do (double oracle), matrix (full table), or either with :MODEL.npz for a value net")
     sp.add_argument("--matchups", default="Toy:Toy",
@@ -338,12 +338,9 @@ def main(argv: list[str] | None = None) -> int:
         connects = [lambda spec=spec: connect(spec, args.candidate_set, args.match_settings) for spec in specs]
         bot_factory = lambda: _selfplay_bot(args)  # noqa: E731
         if any(s.split(":", 1)[0] == "batch" for s in specs):
-            try:
-                from yomibench.batch_play import batch_selfplay_parts
-            except ModuleNotFoundError as e:
-                if e.name != "yomibench.batch_play":
-                    raise
-                raise SystemExit("engine 'batch' isn't available in this build; use game-pool:auto (see docs/SETUP.md)")
+            from yomibench.plugins import batch
+
+            batch_selfplay_parts = batch().batch_selfplay_parts
 
             connects, bot_factory = batch_selfplay_parts(specs, bot_factory, args.max_candidates,
                                                          _previews_fraction(args), args.candidate_set,
@@ -401,12 +398,9 @@ def main(argv: list[str] | None = None) -> int:
         hellos: list[dict] = []  # the first engine's hello, for the ledger row
         batch = None
         if any(s.split(":", 1)[0] == "batch" for s in specs):
-            try:
-                from yomibench.batch_play import batch_arena_engines
-            except ModuleNotFoundError as e:
-                if e.name != "yomibench.batch_play":
-                    raise
-                raise SystemExit("engine 'batch' isn't available in this build; use game-pool:auto (see docs/SETUP.md)")
+            from yomibench.plugins import batch
+
+            batch_arena_engines = batch().batch_arena_engines
 
             # every bot's net, each seat scored on its own features
             batch = batch_arena_engines(bots, match_settings=args.match_settings)

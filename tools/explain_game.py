@@ -211,7 +211,9 @@ def research(header: dict[str, Any], decisions: list[dict[str, Any]], result: di
 
     bots = bots_for(header, nets)
     if make_engine is None:
-        from yomibench.batch_play import batch_arena_engines
+        from yomibench.plugins import batch
+
+        batch_arena_engines = batch().batch_arena_engines
 
         cset = header.get("engine", {}).get("candidate_set")
         engine = batch_arena_engines(bots, int(cset) if cset not in (None, "") else None)("batch:1")

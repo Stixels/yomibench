@@ -1,0 +1,24 @@
+# This machine's yomibench settings. Copy to yomibench.local.toml (gitignored) or ~/.yomibench/config.toml, or
+# point $YOMIBENCH_CONFIG at a file. Every key is optional; without a file you get these defaults. See docs/CONFIG.md.
+
+[machine]
+# name = "my-pc"                 # a training fleet's machine id
+
+[paths]
+# data_root = "D:/bench-data"
+# game_dir = "C:/Program Files (x86)/Steam/steamapps/common/YourOnlyMoveIsHUSTLE"   # else $YOMIBENCH_GAME_DIR, else Steam
+# scene_dir = ""
+# yomibench_repo = ""             # a checkout that tools run from by path (else $YB_REPO)
+
+[hub]
+# url = "http://hub.example:8765/"
+# best_url = "http://hub.example:8765/best.json"   # human play's current-best (else $YOMIBENCH_BEST, ~/.yomibench/best.json)
+
+[game]
+require_steam_install = true     # false only on rigs that run archived copies of the game
+
+[plugins]
+modules = []                     # extra plugin modules (installed plugins register through entry points)
+
+[privacy]
+# deny_file = ""                  # private terms for tools/privacy_scan.py; keep it outside every repository

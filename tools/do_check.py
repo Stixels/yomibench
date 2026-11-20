@@ -153,10 +153,11 @@ def replay_check(args) -> None:
     from render_record import read_record as load_record, state_diff
 
     from yomibench import bots as bots_mod, search
-    from yomibench.batch_play import BatchEngine, BatchValue
+    from yomibench.plugins import batch
     from yomibench.bots import FactorExplore, MatrixBot, turn_candidates
     from yomibench.valuenet import ValueNet
 
+    BatchEngine, BatchValue = batch().BatchEngine, batch().BatchValue
     settings = [tuple(float(x) for x in s.split(":")) for s in args.settings.split(",")]
     net = BatchValue(ValueNet.load(args.net))
     chosen = _sample(sorted(args.dir.glob("g*.jsonl.gz")), args.decisions, args.per_game, args.seed)

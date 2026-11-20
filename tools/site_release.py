@@ -6,7 +6,7 @@ gen-N.json holds only what the site shows: the generation, when it was promoted,
 candidate set), the model's sha256, the promotion test against the previous generation (pooled and per matchup,
 with 95% intervals and game counts), any anchor results against older generations, and the featured and cast videos
 (file, slot, matchup, result, turns, which side the new generation played). No paths, machine names or seeds. Videos are
-copied as gen-N-<name>.mp4, each with a poster still (gen-N-<name>.jpg). The output is checked with export_public's scrub patterns before it's written.
+copied as gen-N-<name>.mp4, each with a poster still (gen-N-<name>.jpg). The output is checked with tools/privacy_scan.py's rules before it's written.
 """
 from __future__ import annotations
 
@@ -83,13 +83,11 @@ def poster(video: Path) -> Path | None:
 
 
 def scrub_check(text: str) -> list[str]:
-    spec = importlib.util.spec_from_file_location("export_public", ROOT / "tools" / "export_public.py")
-    if spec is None or not (ROOT / "tools" / "export_public.py").exists():
-        raise SystemExit("site_release: the scrub checker (tools/export_public.py) isn't in this checkout, so the "
-                         "release can't be checked; build releases from the private repository")
-    ep = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ep)
-    return [why for pat, why in ep.SCRUB if re.search(pat, text)]
+    """Why `text` may not be published: tools/privacy_scan.py's rules (plus the local deny file, if configured)."""
+    spec = importlib.util.spec_from_file_location("privacy_scan", ROOT / "tools" / "privacy_scan.py")
+    ps = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ps)
+    return [why for rx, why in ps.rules(ps.default_deny_file()) if rx.search(text)]
 
 
 def main(argv=None) -> int:

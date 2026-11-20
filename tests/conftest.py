@@ -1,4 +1,10 @@
+import os
+
 import pytest
+
+# No developer's local config (yomibench.localconfig) reaches the tests: the public defaults, as in CI.
+os.environ["YOMIBENCH_CONFIG"] = "-"
+os.environ.pop("YOMIBENCH_ENGINE_PLUGINS", None)
 
 
 @pytest.fixture(autouse=True)
