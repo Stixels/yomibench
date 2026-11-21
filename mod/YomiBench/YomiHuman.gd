@@ -59,7 +59,7 @@ extends Node
 # `link` is the node that carries messages between the two (VsBot.gd / MpClient.gd).
 
 const PROTOCOL = 1
-const VERSION = "10"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message; 9: locked_in in every match (the untimed after-lock cap), the bot's status, forfeit results, the result card; 10: the net's short sha256 in the bottom bar
+const VERSION = "11"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message; 9: locked_in in every match (the untimed after-lock cap), the bot's status, forfeit results, the result card; 10: the net's short sha256 in the bottom bar; 11: the bot's clock in each decision (the ranked bank)
 # The characters the panel offers until the server's hello names the ones its sim plays.
 var characters = ["Ninja", "Cowboy", "Wizard", "Mutant", "Robot"]
 
@@ -734,6 +734,11 @@ func _decision():
 	if single_clock:
 		_clock_turn_start()
 	var msg = {"type": "decision", "turn": turn, "snapshot": _snapshot()}
+	# The bot's own clock (the game's P2 turn timer) as the turn opens: the server plans a ranked bank from it. Only the
+	# bot's clock, never anything of the human's.
+	var bot_clock = _bot_clock_left()
+	if bot_clock >= 0:
+		msg["bot_clock_s"] = bot_clock
 	if turn > 0:
 		if submitted_for != pending_turn:  # P2's clock ran out before the bot's answer: P2 played the timeout's move
 			p2_fallback = true
