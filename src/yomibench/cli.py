@@ -398,9 +398,9 @@ def main(argv: list[str] | None = None) -> int:
         hellos: list[dict] = []  # the first engine's hello, for the ledger row
         batch = None
         if any(s.split(":", 1)[0] == "batch" for s in specs):
-            from yomibench.plugins import batch
+            from yomibench.plugins import batch as batch_plugin  # not `batch`: that's the engine factory
 
-            batch_arena_engines = batch().batch_arena_engines
+            batch_arena_engines = batch_plugin().batch_arena_engines
 
             # every bot's net, each seat scored on its own features
             batch = batch_arena_engines(bots, match_settings=args.match_settings)
