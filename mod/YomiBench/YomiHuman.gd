@@ -93,7 +93,9 @@ var games_played = 0
 var rng = RandomNumberGenerator.new()
 
 var layer = null
-var status = null
+var status = null        # the bottom bar's left half (who, which turn, sync)
+var status_r = null      # its right half (the bot's estimate and depth)
+const STATUS_HALF_W = 302  # each half's width: they meet short of the game's "^" button in the middle
 var panel = null
 var title = null
 var info = null
@@ -226,9 +228,13 @@ func _standard_settings():
 func _process(_delta):
 	if side != "host":
 		_net()
-	elif phase == "playing" or phase == "ended":
+	elif phase == "playing" or phase == "ended" or (phase == "idle" and is_instance_valid(main) and is_instance_valid(main.game)):
+		# The game's own Rematch/Quit (and "replay autosaved") under our result panel: this panel starts the next
+		# match instead. Also once the result is in (phase idle): a multiplayer match ends in the game's post-game
+		# replay (a new main.game; UILayer._on_game_playback_requested shows these), and they would come back beside
+		# "Start game", where the game's Rematch would ask the bot's copy for a match we didn't start.
 		var post = main.get_node_or_null("%PostGameButtons") if is_instance_valid(main) else null
-		if post and post.visible:  # the game's rematch: this panel starts the next match instead
+		if post and post.visible:
 			post.hide()
 	match phase:
 		"starting":
@@ -358,6 +364,7 @@ func _on_hello(r):
 		link.to_host("hello", r)
 		return
 	phase = "idle"
+	_set_controls(true)
 	if typeof(r.get("characters")) == TYPE_ARRAY and not r.characters.empty():
 		_fill_characters(r.characters)
 	var opts = r.get("options", {})
@@ -385,8 +392,19 @@ func _on_hello(r):
 
 func _panel_title():
 	if side == "host":
-		return "YomiBench multiplayer: you (P1) against %s (P2), over this PC only" % str(server.get("bot", "the bot"))
-	return "YomiBench: play P1 against %s" % str(server.get("bot", "the bot"))
+		return "YomiBench multiplayer: you (P1) against %s (P2), over this PC only" % bot_name()
+	return "YomiBench: play P1 against %s" % bot_name()
+
+
+# The bot's name for the player: a promoted generation's label ("r3-g14", as the records keep it) as the site and
+# the guides name it ("HustleBot g14"); any other label as it is.
+func bot_name(default = "the bot"):
+	var b = str(server.get("bot", ""))
+	if b == "":
+		return default
+	if b.begins_with("r3-g") and b.substr(4).is_valid_integer():
+		return "HustleBot g" + b.substr(4)
+	return b
 
 
 func _next_or_quit(nxt):
@@ -563,6 +581,11 @@ func _attach():
 		game.connect("game_ended", self, "_on_host_game_ended")
 		game.p1.connect("action_selected", self, "_on_host_move", [1])
 		game.p2.connect("action_selected", self, "_on_host_move", [2])
+		# The game opens its chat box for every multiplayer match; nobody is on the other end here, and it covers
+		# the right of the stage. The chat key (Enter) still opens it.
+		var chat = main.get_node_or_null("%ChatWindow")
+		if chat:
+			chat.hide()
 		phase = "playing"
 		return
 	game.connect("game_ended", self, "_on_game_ended")
@@ -1103,11 +1126,23 @@ func _make_overlay():
 	layer.layer = 120
 	add_child(layer)
 	var theme = load("res://theme.tres")
+	# The bottom bar, in the game's bottom row (y 344-356 of the 640x360 UI), split around the row's middle: the
+	# game's options-bar button ("^") sits at x 310-330. Left: who and which turn; right: the bot's estimate and
+	# depth. Each is clipped to its half, and both hide while the game uses the row itself (_status_room).
 	status = Label.new()
 	status.rect_position = Vector2(4, 346)
-	if theme:
-		status.theme = theme
-	layer.add_child(status)
+	status.rect_size = Vector2(STATUS_HALF_W, 12)
+	status.clip_text = true
+	status_r = Label.new()
+	status_r.rect_position = Vector2(640 - 4 - STATUS_HALF_W, 346)
+	status_r.rect_size = Vector2(STATUS_HALF_W, 12)
+	status_r.clip_text = true
+	status_r.align = Label.ALIGN_RIGHT
+	for l in [status, status_r]:
+		l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if theme:
+			l.theme = theme
+		layer.add_child(l)
 	panel = PanelContainer.new()
 	if theme:
 		panel.theme = theme
@@ -1173,9 +1208,18 @@ func _make_overlay():
 	info = Label.new()
 	info.autowrap = true
 	box.add_child(info)
+	# Until the bot's hello the choices can't apply (the hello sets the presets and the defaults, and Start does
+	# nothing): greyed, so nothing picked while connecting is silently reset. "Back to main menu" stays live.
+	_set_controls(false)
 	_show_panel(wait_title if wait_title != "" else "YomiBench: connecting to the bot server...", wait_text)
 	if autoplay:
 		panel.hide()
+
+
+func _set_controls(on):
+	for c in [p1_opt, p2_opt, settings_opt, pick_opt, estimate_box, think_box, timer_box, start_btn]:
+		if c != null:
+			c.disabled = not on
 
 
 # Host: VsBot.gd's progress and failure texts while the bot isn't up (the server's phase, or why it gave up).
@@ -1209,11 +1253,13 @@ func bot_crashed(text = ""):
 		get_tree().quit(4)
 		return
 	if panel != null:
+		_set_controls(false)  # no new match against a server that's gone (single: the launcher's restart re-enables)
 		title.text = "YomiBench: the bot crashed"
 		info.text = text
 		panel.show()
 	if status != null:
 		status.text = "YomiBench: the bot crashed. Go back to the main menu and start a new match."
+		status_r.text = ""
 
 
 func _on_back_pressed():
@@ -1260,36 +1306,63 @@ func _say(t):
 
 
 func _update_status():
-	if status == null or crashed:
+	if status == null:
+		return
+	var room = _status_room()
+	status.visible = room
+	status_r.visible = room
+	if crashed:
 		return
 	if side == "host":
 		_update_host_status()
 		return
-	var s = "YomiBench vs %s" % str(server.get("bot", "?")) if connected else "YomiBench: waiting for the bot server on port %d" % port
+	var s = "YomiBench vs %s" % bot_name("?") if connected else "YomiBench: waiting for the bot server on port %d" % port
+	var r = []
 	if phase == "playing":
 		s += "  |  game %d, turn %d" % [games_played + 1, turn]
 		if desynced:
-			s += "  |  OUT OF SYNC (game won't count)"
-		if shown_estimate != null:
-			s += "  |  bot's estimate: %d%% for the bot" % int(shown_estimate)
-		if depth_text != "":
-			s += "  |  bot thought: %s" % depth_text
+			s += "  |  OUT OF SYNC: won't count"
 		if pick_pending and is_instance_valid(game) and not game.p1.state_interruptable:
-			s += "  |  bot is thinking..."
+			r.append("bot is thinking...")
+		if shown_estimate != null:
+			r.append("bot's estimate: %d%% for the bot" % int(shown_estimate))
+		if depth_text != "":
+			r.append("bot thought: %s" % depth_text)
 	status.text = s
+	status_r.text = PoolStringArray(r).join("  |  ")
 
 
 # Host: no "bot is thinking": as online, the game's own timer bar and sound say when the other side locked in.
 func _update_host_status():
-	var s = "YomiBench multiplayer vs %s" % str(server.get("bot", "?")) if not server.empty() else "YomiBench: starting the bot's game..."
+	var s = "YomiBench vs %s" % bot_name("?") if not server.empty() else "YomiBench: starting the bot's game..."
 	if server.empty() and wait_text != "":
 		s = "YomiBench: " + wait_text.split("\n")[0]
+	var r = []
 	if phase == "playing":
 		s += "  |  game %d, turn %d" % [games_played + 1, turn]
 		if remote_status.get("desynced", false) or desynced:
-			s += "  |  OUT OF SYNC (game won't count)"
+			s += "  |  OUT OF SYNC: won't count"
 		if remote_status.get("estimate") != null:
-			s += "  |  bot's estimate: %d%% for the bot" % int(remote_status.estimate)
+			r.append("bot's estimate: %d%% for the bot" % int(remote_status.estimate))
 		if str(remote_status.get("depth", "")) != "":
-			s += "  |  bot thought: %s" % str(remote_status.depth)
+			r.append("bot thought: %s" % str(remote_status.depth))
 	status.text = s
+	status_r.text = PoolStringArray(r).join("  |  ")
+
+
+# Whether the bottom bar may show: not while our panel is up (it says the same, and on the main menu the bar would
+# sit on the game's version and Mod List labels), and not while the game uses its bottom row itself: its options
+# bar (the "^" button's ghost and speed settings), or its HUD hidden (F1 hides the game's UI layer).
+func _status_room():
+	if autoplay:
+		return true
+	if panel != null and panel.visible:
+		return false
+	var m = get_tree().current_scene
+	if m == null or not m.has_method("_on_match_ready"):
+		return true
+	var ui = m.get("ui_layer")
+	if ui != null and is_instance_valid(ui) and not ui.visible:
+		return false
+	var bar = m.get_node_or_null("%OptionsBar")
+	return bar == null or not bar.visible
