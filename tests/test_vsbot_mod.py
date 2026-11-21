@@ -225,5 +225,7 @@ def test_the_bottom_bar_names_the_net_by_its_short_sha256():
     assert human.count("_bot_wins()") == 4 and "The bot wins." not in human
     # and the HUD's name tag over P2 (the game's player list, which the bot's copy joined as "YomiBench bot")
     body = _func(human, "func _name_the_bot():")
-    assert "Network.players[id] = bot_name(" in body and "get_network_unique_id()" in body
+    assert "Network.players[id] = bot_name(BOT_JOIN_NAME)" in body and "== BOT_JOIN_NAME" in body
+    client = (MOD / "MpClient.gd").read_text()
+    assert 'const BOT_JOIN_NAME = "YomiBench bot"' in human and '"YomiBench bot")' in client  # the same name both ends
     assert "_name_the_bot()" in _func(human, "func _on_hello(r):")
