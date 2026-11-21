@@ -518,7 +518,17 @@ class Session:
         return {"type": "hello", "protocol": PROTOCOL, "bot": self.label, "candidate_set": self.candidate_set,
                 "characters": list(self.characters), "mode": self.mode, "options": dict(self.options),
                 "pick_styles": list(PICK_STYLES), "settings_presets": self.presets, "lock_cap_s": self.lock_cap,
-                "settings_refused": self.presets_refused, "next": self._next()}
+                "settings_refused": self.presets_refused, "model": self.hello_model(), "next": self._next()}
+
+    def hello_model(self) -> dict[str, Any] | None:
+        """The net the bot plays, for the mod's status bar: its generation, a short sha256 (the hub's record of the
+        net, `hub_sha256`, when the file is a trimmed copy of it) and where it came from (`source`). None for a bot
+        that isn't a promoted net."""
+        m = self.model or {}
+        if not m.get("sha256"):
+            return None
+        return {"generation": m.get("generation"), "sha": str(m.get("hub_sha256") or m["sha256"])[:8],
+                "source": m.get("source")}
 
     def settings_like(self, settings: dict[str, Any]) -> dict[str, Any]:
         """`settings` in the types of the sim's standard ones: JSON's 600.0 as 600 for an integer

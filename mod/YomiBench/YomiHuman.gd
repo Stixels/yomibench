@@ -59,7 +59,7 @@ extends Node
 # `link` is the node that carries messages between the two (VsBot.gd / MpClient.gd).
 
 const PROTOCOL = 1
-const VERSION = "9"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message; 9: locked_in in every match (the untimed after-lock cap), the bot's status, forfeit results, the result card
+const VERSION = "10"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message; 9: locked_in in every match (the untimed after-lock cap), the bot's status, forfeit results, the result card; 10: the net's short sha256 in the bottom bar
 # The characters the panel offers until the server's hello names the ones its sim plays.
 var characters = ["Ninja", "Cowboy", "Wizard", "Mutant", "Robot"]
 
@@ -386,6 +386,8 @@ func _on_hello(r):
 		_say("The bot server refused: %s" % str(r.get("message")))
 		return
 	server = r
+	if side == "host":
+		_name_the_bot()
 	var was_crashed = crashed
 	crashed = false
 	if side == "client":  # the panel is the host's
@@ -438,6 +440,30 @@ func bot_name(default = "the bot"):
 	if b.begins_with("r3-g") and b.substr(4).is_valid_integer():
 		return "HustleBot g" + b.substr(4)
 	return b
+
+
+# Host: the game names the bot's seat (the HUD's tag over P2, the replay's user data) by the username the bot's copy
+# of the game joined with (BOT_JOIN_NAME, before it knew which bot it plays). Once the hello names the bot, that entry
+# of the game's player list becomes the bot's name ("HustleBot g15"), as the panel and the bottom bar say. Matched by
+# the name, not the peer id: in a direct-connect game the list holds each name under the other peer's id.
+const BOT_JOIN_NAME = "YomiBench bot"  # MpClient.gd joins with this name
+
+
+func _name_the_bot():
+	for id in Network.players.keys():
+		if str(Network.players[id]) == BOT_JOIN_NAME:
+			Network.players[id] = bot_name(BOT_JOIN_NAME)
+
+# The bottom bar's note on the net (the hello's `model`): " (model 65888397)", its short sha256, plus "from your model
+# folder" when the app plays a newer net from the player's model folder instead of its bundled one. "" without one.
+func model_text():
+	var m = server.get("model")
+	if typeof(m) != TYPE_DICTIONARY or str(m.get("sha", "")) == "":
+		return ""
+	var t = " (model %s" % str(m.sha)
+	if str(m.get("source", "")) == "model folder":
+		t += ", from your model folder"
+	return t + ")"
 
 
 func _next_or_quit(nxt):
@@ -971,7 +997,7 @@ func _send_end(w, forfeit_seat):
 	_send(msg, "_on_result")
 	if side == "single" and not autoplay:
 		ended_msec = OS.get_ticks_msec()
-		var res = "You win!" if w == 0 else ("The bot wins." if w == 1 else "Draw.")
+		var res = "You win!" if w == 0 else (_bot_wins() if w == 1 else "Draw.")
 		_card_text(_forfeit_text() if forfeit_seat != null else "Game over. %s (%d turns)" % [res, turn], "Saving the game...")
 
 
@@ -1010,7 +1036,14 @@ func _on_forfeit(who):
 
 
 func _forfeit_text():
-	return "Game over. You forfeited: the bot wins." if forfeiter == 1 else "Game over. The bot forfeited: you win!"
+	if forfeiter == 1:
+		return "Game over. You forfeited: %s wins." % bot_name("the bot")
+	return "Game over. %s forfeited: you win!" % bot_name("The bot")
+
+
+# "HustleBot g15 wins." (the bot by its name, as the panel and the bottom bar name it).
+func _bot_wins():
+	return "%s wins." % bot_name("The bot")
 
 
 func _on_result(r):
@@ -1088,7 +1121,7 @@ func _on_host_game_ended(_winner = null):
 	phase = "ended"
 	if autoplay:
 		return
-	var res = "You win!" if game.p1.hp > game.p2.hp else ("The bot wins." if game.p2.hp > game.p1.hp else "Draw.")
+	var res = "You win!" if game.p1.hp > game.p2.hp else (_bot_wins() if game.p2.hp > game.p1.hp else "Draw.")
 	ended_msec = OS.get_ticks_msec()  # the card waits a moment: the final hit, the HP bars and the clocks stay visible
 	_card_text("Game over. %s (%d turns)" % [res, turn], "Saving the game...")
 
@@ -1112,7 +1145,7 @@ func _show_result(r):
 		_card_text("Game over", "The bot couldn't save this game: %s" % str(r.get("message")))
 		_card_now()
 		return
-	var res = {"human": "You win!", "bot": "The bot wins.", "draw": "Draw."}.get(r.get("result"), str(r.get("result")))
+	var res = {"human": "You win!", "bot": _bot_wins(), "draw": "Draw."}.get(r.get("result"), str(r.get("result")))
 	var t = "Game over. %s (%d turns)" % [res, int(r.get("turns", 0))]
 	if typeof(r.get("forfeit")) in [TYPE_INT, TYPE_REAL] or forfeiter != 0:
 		t = _forfeit_text()
@@ -1538,7 +1571,7 @@ func _update_status():
 	if side == "host":
 		_update_host_status()
 		return
-	var s = "YomiBench vs %s" % bot_name("?") if connected else "YomiBench: waiting for the bot server on port %d" % port
+	var s = "YomiBench vs %s%s" % [bot_name("?"), model_text()] if connected else "YomiBench: waiting for the bot server on port %d" % port
 	var r = []
 	if phase == "playing":
 		s += "  |  game %d, turn %d" % [games_played + 1, turn]
@@ -1557,7 +1590,7 @@ func _update_status():
 # Host: the bot's status from the game's own turn-ready flags (Network.turns_ready: THAT a player locked in, what online
 # play shows as "Ready"), never its move.
 func _update_host_status():
-	var s = "YomiBench vs %s" % bot_name("?") if not server.empty() else "YomiBench: starting the bot's game..."
+	var s = "YomiBench vs %s%s" % [bot_name("?"), model_text()] if not server.empty() else "YomiBench: starting the bot's game..."
 	if server.empty() and wait_text != "":
 		s = "YomiBench: " + wait_text.split("\n")[0]
 	var r = []
