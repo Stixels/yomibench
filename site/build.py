@@ -675,10 +675,8 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
         note += (f" A new rating era started with spec {spec_hash(aspec)} on {era_start[0]}; earlier provisional "
                  f"results stay under the old spec {era_start[1]}.")
     body = (f'<header class="pagehead"><p class="eyebrow">Your Only Move Is HUSTLE · bot arena</p>'
-            f'<h1>The Arena</h1><p class="lead">Phase 1 is a value-net division: every entry\'s nets play inside the '
-            f'same search, ours, under one fixed set of ranked settings and the same thinking budget per move, so a '
-            f'rating measures the nets, not a whole bot. HustleBot, our own bot, is the house entry: each of its '
-            f'generations is listed as HustleBot gN.</p><p class="small">Rated games run on our private simulator of '
+            f'<h1>The Arena</h1><p class="lead">HustleBot\'s ratings so far. The Arena is being redesigned: two divisions are '
+            f'coming (model alone and full bot).</p><p class="small">Rated games run on our private simulator of '
             f'the game, checked against the real game; every video is the game replayed in the real '
             f'game.</p></header>'
             f'{hero}<section><div class="sechead"><h2>{board_title}</h2><span class="small">Bradley–Terry rating with '

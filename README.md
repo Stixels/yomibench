@@ -59,8 +59,7 @@ More: [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
 ## Docs
 
 [Setup](docs/SETUP.md) · [Training](docs/TRAINING.md) · [Methodology](docs/METHODOLOGY.md) ·
-[Playing against the bot](docs/PLAYING.md) · [The game mod](docs/MOD.md) · [Protocol](docs/PROTOCOL.md) ·
-[Submit a bot to the Arena](docs/SUBMIT.md)
+[Playing against the bot](docs/PLAYING.md) · [The game mod](docs/MOD.md) · [Protocol](docs/PROTOCOL.md)
 
 ## Acknowledgements
 
