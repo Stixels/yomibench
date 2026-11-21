@@ -158,6 +158,8 @@ def results(rels: list[dict], rows: list[dict] = ()) -> list[tuple[str, str, flo
 # --- ratings ---------------------------------------------------------------------------------------------------
 WEIGHTS_LAG = 2  # HustleBot's weights are published this many generations behind the current best
 ARENA_ONLY_GAMES = 100  # per bot, in the current spec's era, before the Arena rates on its own games alone
+# When each Arena spec's rating era started, and the spec it replaced: {spec hash: (date, previous spec hash)}.
+ERA_STARTS = {"b33e39c692b8": ("Nov 20, 2026", "f6910abccc01")}
 PRIOR_GAMES = 2  # each player also drew this many games against a fixed reference: keeps a perfect score finite
 
 
@@ -700,6 +702,10 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
                 "pairs and 16 pairs against each other character), so compare ratings within an era. The Arena's "
                 f"round-robin of the current era is under way ({sum(r['games'] for r in rows)} games so far) and takes "
                 f"over once every bot has {ARENA_ONLY_GAMES}. {pooled}")
+    era_start = ERA_STARTS.get(spec_hash(aspec)) if aspec else None
+    if era_start:
+        note += (f" A new rating era started with spec {spec_hash(aspec)} on {era_start[0]}; earlier provisional "
+                 f"results stay under the old spec {era_start[1]}.")
     body = (f'<header class="pagehead"><p class="eyebrow">Your Only Move Is HUSTLE · bot arena</p>'
             f'<h1>The Arena</h1><p class="lead">Phase 1 is a value-net division: every entry\'s nets play inside the '
             f'same search, ours, under one fixed set of ranked settings and the same thinking budget per move, so a '

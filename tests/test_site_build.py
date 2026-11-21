@@ -43,7 +43,7 @@ def site(tmp_path, rels, arena_rows=None, bots=None, docs=DOCS, spa=False):
     for name, text in docs.items():
         (d / name).write_text(text, encoding="utf-8")
     arena = tmp_path / "arena"
-    (arena / "results").mkdir(parents=True)
+    (arena / "results").mkdir(parents=True, exist_ok=True)
     (arena / "bots.json").write_text(json.dumps(bots or []), encoding="utf-8")
     if arena_rows:
         (arena / "results" / "ranked.jsonl").write_text("\n".join(json.dumps(r) for r in arena_rows), encoding="utf-8")
@@ -153,3 +153,13 @@ def test_the_newest_two_generations_have_no_public_weights(tmp_path):
     assert "house bot, weights not public" in read(out, "/bots/g4/") and "house bot, weights not public" in read(out, "/bots/g3/")
     assert "release and weights" in read(out, "/bots/g2/") and "weights not public" not in read(out, "/bots/g2/")
     assert read(out, "/").count("house bot, weights not public") == 2
+
+
+def test_a_new_spec_says_its_rating_era_started(tmp_path):
+    spec = json.loads((ROOT / "arena" / "spec.json").read_text(encoding="utf-8"))
+    assert sb.spec_hash(spec) in sb.ERA_STARTS  # repinning arena/spec.json means saying when its era started
+    (tmp_path / "arena").mkdir()
+    (tmp_path / "arena" / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    home = read(site(tmp_path, [rel(2, 1, 0.7, 200), rel(3, 2, 0.6, 200)]), "/")
+    date, old = sb.ERA_STARTS[sb.spec_hash(spec)]
+    assert f"A new rating era started with spec {sb.spec_hash(spec)} on {date}" in home and old in home
