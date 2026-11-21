@@ -21,10 +21,15 @@ extends Node
 # - Inputs are read from each fighter right after on_action_selected (its queued action, data and
 #   extra, as the replay records them), so P1's are exactly what the UI sent.
 # - At the end it sends the final snapshot and the winner; the server writes the result.
-# - "Bot thinks until you lock in" (panel; default off): when P1 locks in (P1's action_selected) while
-#   the bot's pick is still pending, the mod sends a one-way {"type": "locked_in", "turn": N} (no
-#   reply, no callback queued): THAT P1 locked in, never what. P1's input still reaches the server
-#   only with the next decision. The bottom bar shows how deep the bot got (the reply's `depth`).
+# - Lock-in: when P1 locks in (P1's action_selected) while the bot's pick is still pending, the mod sends a
+#   one-way {"type": "locked_in", "turn": N} (no reply, no callback queued): THAT P1 locked in, never what. P1's
+#   input still reaches the server only with the next decision. "Bot uses your thinking time" (panel) has the bot
+#   deepen its search until then; with no turn timer the bot answers at most `lock_cap_s` (the server's hello,
+#   10 s) after it (the after-lock cap), so it is sent in every match. The bottom bar shows the bot's status:
+#   thinking, locked in, or (untimed, after you lock in) "finishing... N s", from the game's own turn-ready flags
+#   (the same "the other side locked in" online play shows), never the bot's move.
+# - A forfeit (the game's pause menu): the game ends the match without its game_ended signal; the mod sees the
+#   game's forfeit flag, shows the result and sends `end` with the winner and `forfeit` (the forfeiter: 0 = P1).
 # - "Turn timer" (panel; default on for a preset with a timer, i.e. ranked, as the game plays it, off for
 #   standard): the game's own turn timer, from the match's settings (timer_mode, turn_time, turn_min_length,
 #   increment_*). Online ("host"/"client") the game runs it itself. Singleplayer the game never starts it, so
@@ -33,7 +38,7 @@ extends Node
 #   same outcome: P1's panel locks in what it holds (ActionButtons.timeout); the bot, if its answer is late,
 #   holds (Continue). The bot answers before the timer: the server's deadline, plus a backstop here that
 #   reads the bot's real clock (the game's P2 timer) and sends a one-way `deadline` 1.5 s before it ends.
-#   With the timer on, "Bot thinks until you lock in" defaults on too: the bot uses its clock, deepening its
+#   With the timer on, "Bot uses your thinking time" defaults on too: the bot uses its clock, deepening its
 #   search until you lock in or its deadline (whichever is first), then locks in.
 #   Off: timer_mode "none" (the standard settings' clock).
 #
@@ -54,7 +59,7 @@ extends Node
 # `link` is the node that carries messages between the two (VsBot.gd / MpClient.gd).
 
 const PROTOCOL = 1
-const VERSION = "8"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message
+const VERSION = "9"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message; 9: locked_in in every match (the untimed after-lock cap), the bot's status, forfeit results, the result card
 # The characters the panel offers until the server's hello names the ones its sim plays.
 var characters = ["Ninja", "Cowboy", "Wizard", "Mutant", "Robot"]
 
@@ -142,7 +147,20 @@ var autoplay_wait = 0.0
 var crashed = false      # the bot server went away (a crash): the panel says so until the bot is back
 var probe_at = 0         # next read that checks the server connection is still there (a dead peer sends nothing)
 # What the panel says when the bot server goes away mid-match (or at any time once it was up).
-const CRASH_TEXT = "The bot crashed (log: %s). Go back to the main menu and start a new match."
+const CRASH_TEXT = "The bot stopped. Go back to the main menu to start again.\n(Its log: %s)"
+var lock_cap_s = 10.0    # untimed: the bot answers within this long after P1 locks in (the server's hello)
+var last_msg = {}        # the last match's start message: Rematch plays the same settings and characters again
+var card = null          # the result card (Rematch / Change settings / Main menu)
+var card_title = null
+var card_info = null
+var rematch_btn = null
+var result_in = false    # the bot's record of the finished match arrived (Rematch waits for it)
+var ended_msec = 0       # when the match ended: the card waits a moment so the final hit stays visible
+const CARD_DELAY_MS = 1500
+var forfeiter = 0        # the match ended on a forfeit by this player (1 or 2), else 0
+var pause_hid = []       # our controls hidden while the game's pause menu is open
+var chat_game = null     # the game whose chat box was closed (the post-game replay is a new one)
+var log_btn = null       # crash: opens the bot's log folder
 
 
 func _ready():
@@ -236,6 +254,17 @@ func _process(_delta):
 		var post = main.get_node_or_null("%PostGameButtons") if is_instance_valid(main) else null
 		if post and post.visible:
 			post.hide()
+		# The game opens its chat box for every multiplayer game, the post-game replay (a new main.game) too: closed
+		# once per game, so the chat key (Enter) still opens it.
+		if is_instance_valid(main) and is_instance_valid(main.game) and main.game != chat_game:
+			chat_game = main.game
+			var chat = main.get_node_or_null("%ChatWindow")
+			if chat:
+				chat.hide()
+	_pause_menu_frame()
+	if ended_msec > 0 and OS.get_ticks_msec() - ended_msec >= CARD_DELAY_MS:
+		ended_msec = 0
+		_show_card()
 	match phase:
 		"starting":
 			_attach()
@@ -365,6 +394,10 @@ func _on_hello(r):
 		return
 	phase = "idle"
 	_set_controls(true)
+	if typeof(r.get("lock_cap_s")) in [TYPE_INT, TYPE_REAL]:
+		lock_cap_s = float(r.lock_cap_s)
+	if log_btn:
+		log_btn.hide()
 	if typeof(r.get("characters")) == TYPE_ARRAY and not r.characters.empty():
 		_fill_characters(r.characters)
 	var opts = r.get("options", {})
@@ -392,8 +425,8 @@ func _on_hello(r):
 
 func _panel_title():
 	if side == "host":
-		return "YomiBench multiplayer: you (P1) against %s (P2), over this PC only" % bot_name()
-	return "YomiBench: play P1 against %s" % bot_name()
+		return "You vs %s (local)" % bot_name()
+	return "You vs %s" % bot_name()
 
 
 # The bot's name for the player: a promoted generation's label ("r3-g14", as the records keep it) as the site and
@@ -444,6 +477,7 @@ func _start_match(p1, p2, seed_):
 	if autoplay:  # the launcher's choices, with thinking on the clock as the panel's default
 		options = {"think_until_lockin": think, "turn_timer": timer_on}
 	var msg = {"p1": p1, "p2": p2, "seed": seed_, "settings": _match_settings(preset, timer_on), "options": options, "think": think}
+	last_msg = msg.duplicate(true)
 	if side == "host":
 		# The client tells the server and starts the same match; both games then run it in lockstep.
 		link.to_client("match", msg)
@@ -508,9 +542,14 @@ func _launch(msg):
 	p1_locked_tick = -1000
 	submitted_for = -1
 	p2_timeouts = 0
+	forfeiter = 0
+	result_in = false
+	ended_msec = 0
 	phase = "starting"
 	if panel:
 		panel.hide()
+	if card:
+		card.hide()
 	main._on_match_ready(data)
 
 
@@ -560,6 +599,29 @@ func _match_settings(name, timer_on):
 	return s
 
 
+# The result card's Rematch: the last match's characters and settings again, with a new seed (the panel's own
+# choices are unchanged, so "Change settings" still shows them).
+func _on_rematch_pressed():
+	var ready = connected if side == "single" else not server.empty()
+	if last_msg.empty() or phase == "playing" or phase == "starting" or not ready or not result_in:
+		return
+	randomize()
+	var msg = last_msg.duplicate(true)
+	msg["seed"] = randi()
+	if side == "host":
+		link.to_client("match", msg)
+		remote_status = {}
+		_launch(msg)
+	else:
+		start_bot_match(msg)
+
+
+func _on_change_settings_pressed():
+	if card:
+		card.hide()
+	_show_panel(_panel_title(), "")
+
+
 func _on_preset_selected(i):
 	timer_box.pressed = str(presets.get(str(preset_names[max(0, i)]), {}).get("timer_mode", "none")) != "none"
 	think_box.pressed = timer_box.pressed  # on the clock, the bot thinks until you lock in (or its deadline)
@@ -605,6 +667,12 @@ func _attach():
 
 
 func _play_frame():
+	# A forfeit first: the game ends the match at once and starts its post-game replay (a new main.game), which
+	# would otherwise read as the match being closed.
+	var f = _forfeit_by()
+	if f != 0:
+		_on_forfeit(f)
+		return
 	if not is_instance_valid(game) or not is_instance_valid(main) or main.game != game:
 		_abort("the match was closed")
 		return
@@ -659,8 +727,8 @@ func _decision():
 	depth_text = ""
 	_send(msg, "_on_pick")
 	var locked = p1_locked_tick == decision_tick if side == "client" else inputs_at.has(decision_tick) and inputs_at[decision_tick][0] != null
-	if think_on and locked:
-		_notify({"type": "locked_in", "turn": pending_turn})  # P1 locked in before this was sent
+	if locked:  # P1 locked in before this was sent (every match: untimed, the after-lock cap counts from it)
+		_notify({"type": "locked_in", "turn": pending_turn})
 	turn += 1
 	_report()
 
@@ -677,7 +745,7 @@ func _on_net_turn_ready(id):
 	if id != 1 or not is_instance_valid(game):
 		return
 	p1_locked_tick = game.current_tick
-	if think_on and pick_pending and phase == "playing" and decision_tick == game.current_tick:
+	if pick_pending and phase == "playing" and decision_tick == game.current_tick:
 		_notify({"type": "locked_in", "turn": pending_turn})
 
 
@@ -852,7 +920,7 @@ func _on_input(_action, _data, _extra, id):
 	# decision it answers. Copied now: the fighter's states may change the dicts during the turn.
 	if not is_instance_valid(game):
 		return
-	if id == 1 and think_on and pick_pending and phase == "playing":
+	if id == 1 and pick_pending and phase == "playing":
 		_notify({"type": "locked_in", "turn": pending_turn})  # that P1 locked in, never what
 	var f = game.p1 if id == 1 else game.p2
 	var t = game.current_tick
@@ -875,12 +943,18 @@ func _inputs_for(tick):
 func _on_game_ended(_winner = null):
 	if phase != "playing":
 		return
-	phase = "ended"
 	var w = null
 	if game.p1.hp > game.p2.hp:
 		w = 0
 	elif game.p2.hp > game.p1.hp:
 		w = 1
+	_send_end(w, null)
+
+
+# Single and client: the match is over (a finish, or a forfeit by `forfeit_seat`, 0 = P1): the server gets the last
+# inputs, the final snapshot and the winner.
+func _send_end(w, forfeit_seat):
+	phase = "ended"
 	if single_clock or (side == "client" and str(main.ui_layer.timer_mode) != "none"):
 		if turn > 0 and submitted_for != pending_turn:
 			p2_timeouts += 1
@@ -889,8 +963,54 @@ func _on_game_ended(_winner = null):
 			link.trace(note)
 		else:
 			print("YomiHuman: ", note)
-	_send({"type": "end", "turn": turn, "inputs": _inputs_for(decision_tick), "snapshot": _snapshot(), "winner": w},
-		"_on_result")
+	var msg = {"type": "end", "turn": turn, "inputs": _inputs_for(decision_tick), "winner": w}
+	if is_instance_valid(game):
+		msg["snapshot"] = _snapshot()
+	if forfeit_seat != null:
+		msg["forfeit"] = forfeit_seat
+	_send(msg, "_on_result")
+	if side == "single" and not autoplay:
+		ended_msec = OS.get_ticks_msec()
+		var res = "You win!" if w == 0 else ("The bot wins." if w == 1 else "Draw.")
+		_card_text(_forfeit_text() if forfeit_seat != null else "Game over. %s (%d turns)" % [res, turn], "Saving the game...")
+
+
+# The player (1 or 2) whose forfeit ended the match, else 0. The game's forfeit (Network.player_forfeit ->
+# game.forfeit) ends the match without its game_ended signal; Network.forfeiter outlives the game it ended.
+func _forfeit_by():
+	if side == "single":
+		if is_instance_valid(game) and game.forfeit and game.forfeit_player != null:
+			return int(game.forfeit_player.id)
+		return 0
+	if int(Network.forfeiter) in [1, 2]:
+		return int(Network.forfeiter)
+	if is_instance_valid(game) and game.forfeit and game.forfeit_player != null:
+		return int(game.forfeit_player.id)
+	return 0
+
+
+func _on_forfeit(who):
+	if phase != "playing":
+		return
+	forfeiter = who
+	_release_clock()
+	if side == "host":
+		phase = "ended"
+		link.trace("turn %d: P%d forfeited" % [turn, who])
+		if autoplay:
+			return
+		ended_msec = OS.get_ticks_msec()
+		_card_text(_forfeit_text(), "Saving the game...")
+		return
+	if side == "single":
+		print("YomiHuman: turn %d: P%d forfeited" % [turn, who])
+	else:
+		link.trace("turn %d: P%d forfeited" % [turn, who])
+	_send_end(2 - who, who - 1)  # the other player wins
+
+
+func _forfeit_text():
+	return "Game over. You forfeited: the bot wins." if forfeiter == 1 else "Game over. The bot forfeited: you win!"
 
 
 func _on_result(r):
@@ -904,14 +1024,7 @@ func _on_result(r):
 		yield(get_tree().create_timer(0.5), "timeout")
 		_next_or_quit(r.get("next"))
 		return
-	phase = "idle"
-	if r.get("type") != "result":
-		_show_panel("Game over", "The bot server couldn't record this game: %s" % str(r.get("message")))
-		return
-	var res = {"human": "You win!", "bot": "The bot wins.", "draw": "Draw."}.get(r.get("result"), str(r.get("result")))
-	var sync = "In sync every turn: the game counts." if r.get("valid", false) else "The bot's simulation lost sync: this game is marked invalid."
-	_show_panel("Game over. %s (%d turns)" % [res, int(r.get("turns", 0))],
-		sync + ("\nPlay again, or go back to the main menu." if hosted else "\nPlay again, or close the window to finish."))
+	_show_result(r)
 
 
 func _abort(reason):
@@ -976,7 +1089,8 @@ func _on_host_game_ended(_winner = null):
 	if autoplay:
 		return
 	var res = "You win!" if game.p1.hp > game.p2.hp else ("The bot wins." if game.p2.hp > game.p1.hp else "Draw.")
-	_show_panel("Game over. %s" % res, "Waiting for the bot's record of the game...")
+	ended_msec = OS.get_ticks_msec()  # the card waits a moment: the final hit, the HP bars and the clocks stay visible
+	_card_text("Game over. %s (%d turns)" % [res, turn], "Saving the game...")
 
 
 func _on_bot_result(r):
@@ -987,13 +1101,49 @@ func _on_bot_result(r):
 		yield(get_tree().create_timer(0.5), "timeout")
 		_next_or_quit(r.get("next"))
 		return
+	_show_result(r)
+
+
+# The result card (single and host): who won, then where the game was saved, with Rematch / Change settings / Main menu.
+func _show_result(r):
 	phase = "idle"
+	result_in = true
 	if r.get("type") != "result":
-		_show_panel("Game over", "The bot server couldn't record this game: %s" % str(r.get("message")))
+		_card_text("Game over", "The bot couldn't save this game: %s" % str(r.get("message")))
+		_card_now()
 		return
 	var res = {"human": "You win!", "bot": "The bot wins.", "draw": "Draw."}.get(r.get("result"), str(r.get("result")))
-	var sync = "In sync every turn: the game counts." if r.get("valid", false) else "The bot's simulation lost sync: this game is marked invalid."
-	_show_panel("Game over. %s (%d turns)" % [res, int(r.get("turns", 0))], sync + "\nPlay again, or go back to the main menu.")
+	var t = "Game over. %s (%d turns)" % [res, int(r.get("turns", 0))]
+	if typeof(r.get("forfeit")) in [TYPE_INT, TYPE_REAL] or forfeiter != 0:
+		t = _forfeit_text()
+	var saved = ("Saved to Documents\\YomiBench (it counts for the bot's stats)." if r.get("valid", false) else
+		"Saved to Documents\\YomiBench, marked invalid: the bot's simulation lost track of the match.")
+	_card_text(t, saved)
+	_card_now()
+
+
+func _card_text(t, i):
+	if card == null:
+		return
+	card_title.text = t
+	card_info.text = i
+	rematch_btn.disabled = not result_in
+
+
+# Show the card now, unless it is still waiting out its delay after the match ended (then _process shows it).
+func _card_now():
+	if ended_msec == 0:
+		_show_card()
+
+
+func _show_card():
+	if autoplay or card == null or crashed:
+		return
+	if panel and panel.visible:  # "Change settings" was pressed: the panel stays, with the result on it
+		info.text = card_title.text + "\n" + card_info.text
+		return
+	rematch_btn.disabled = not result_in
+	card.show()
 
 
 # The game's in-match replay ("playback", R) rebuilds the match from its replay, and "edit_replay"
@@ -1179,20 +1329,22 @@ func _make_overlay():
 	var row2 = HBoxContainer.new()
 	box.add_child(row2)
 	var l3 = Label.new()
-	l3.text = "Bot picks:"
+	l3.text = "Bot style:"
 	row2.add_child(l3)
 	pick_opt = OptionButton.new()
-	pick_opt.add_item("mixed (samples its strategy)")
-	pick_opt.add_item("strongest (its most likely move)")
+	pick_opt.add_item("unpredictable (mixes its moves)")  # pick "mixed": samples its strategy
+	pick_opt.add_item("strongest move only")              # pick "strongest": its most likely move
 	row2.add_child(pick_opt)
 	estimate_box = CheckBox.new()
 	estimate_box.text = "Show the bot's win estimate"
 	box.add_child(estimate_box)
 	think_box = CheckBox.new()
-	think_box.text = "Bot thinks until you lock in"
+	# think_until_lockin: the bot keeps searching while you decide (untimed it still answers within lock_cap_s of
+	# your lock-in; on the clock, within its own time)
+	think_box.text = "Bot uses your thinking time"
 	box.add_child(think_box)
 	timer_box = CheckBox.new()
-	timer_box.text = "Turn timer (the game's online timer; ranked: on)"
+	timer_box.text = "Turn timer (ranked clock)"
 	timer_box.pressed = _timer_default(str(preset_names[0]))
 	box.add_child(timer_box)
 	settings_opt.connect("item_selected", self, "_on_preset_selected")
@@ -1208,12 +1360,61 @@ func _make_overlay():
 	info = Label.new()
 	info.autowrap = true
 	box.add_child(info)
+	log_btn = Button.new()  # crash: the bot's log folder
+	log_btn.text = "Open log folder"
+	log_btn.connect("pressed", self, "_on_log_pressed")
+	log_btn.hide()
+	box.add_child(log_btn)
+	_make_card(theme)
 	# Until the bot's hello the choices can't apply (the hello sets the presets and the defaults, and Start does
 	# nothing): greyed, so nothing picked while connecting is silently reset. "Back to main menu" stays live.
 	_set_controls(false)
 	_show_panel(wait_title if wait_title != "" else "YomiBench: connecting to the bot server...", wait_text)
 	if autoplay:
 		panel.hide()
+
+
+# The result card: small, in the lower middle (the stage's floor and the fighters stay visible above it), shown a
+# moment after the match ends: who won, where the game was saved, and Rematch (the same characters and settings),
+# Change settings (the full panel) and, from the game's menu, Main menu.
+func _make_card(theme):
+	card = PanelContainer.new()
+	if theme:
+		card.theme = theme
+	card.rect_position = Vector2(150, 228)
+	card.rect_min_size = Vector2(340, 0)
+	layer.add_child(card)
+	var box = VBoxContainer.new()
+	card.add_child(box)
+	card_title = Label.new()
+	card_title.autowrap = true
+	card_title.align = Label.ALIGN_CENTER
+	box.add_child(card_title)
+	var row = HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGN_CENTER
+	row.add_constant_override("separation", 10)  # three distinct buttons, not one line of text
+	box.add_child(row)
+	rematch_btn = Button.new()
+	rematch_btn.text = "Rematch"
+	rematch_btn.rect_min_size = Vector2(96, 0)
+	rematch_btn.connect("pressed", self, "_on_rematch_pressed")
+	row.add_child(rematch_btn)
+	var change = Button.new()
+	change.text = "Change settings"
+	change.rect_min_size = Vector2(96, 0)
+	change.connect("pressed", self, "_on_change_settings_pressed")
+	row.add_child(change)
+	if hosted:
+		var menu_btn = Button.new()
+		menu_btn.text = "Main menu"
+		menu_btn.rect_min_size = Vector2(96, 0)
+		menu_btn.connect("pressed", self, "_on_back_pressed")
+		row.add_child(menu_btn)
+	card_info = Label.new()
+	card_info.autowrap = true
+	card_info.align = Label.ALIGN_CENTER
+	box.add_child(card_info)
+	card.hide()
 
 
 func _set_controls(on):
@@ -1230,9 +1431,15 @@ func show_wait(t, text):
 		_show_panel(t, text)
 
 
-# The bot server's log (where a crash's details are), as a Windows path.
+# The bot server's log (where a crash's details are), as the short Windows path the README gives.
 static func crash_text():
-	return CRASH_TEXT % server_file("bot-server.log").replace("/", "\\")
+	return CRASH_TEXT % "%USERPROFILE%\\.yomibench\\bot-server.log"
+
+
+func _on_log_pressed():
+	var f = server_file("bot-server.log")
+	if f != "":
+		OS.shell_open(f.get_base_dir())
 
 
 # The bot server went away (it crashed, or something ended it): say so, on top of the match. Single: the lost
@@ -1254,12 +1461,27 @@ func bot_crashed(text = ""):
 		return
 	if panel != null:
 		_set_controls(false)  # no new match against a server that's gone (single: the launcher's restart re-enables)
-		title.text = "YomiBench: the bot crashed"
+		title.text = "The bot stopped"
 		info.text = text
+		log_btn.show()
+		if card:
+			card.hide()
 		panel.show()
+	# The match can't go on: the player's own action panel greyed and out of reach.
+	if side == "host" and is_instance_valid(p1_panel):  # (single: the launcher restarts the bot in the same game)
+		p1_panel.modulate = Color("b3b3b3")
+		p1_panel.set_process_input(false)
+		_ignore_mouse(p1_panel)
 	if status != null:
-		status.text = "YomiBench: the bot crashed. Go back to the main menu and start a new match."
+		status.text = "YomiBench: the bot stopped. Go back to the main menu to start again."
 		status_r.text = ""
+
+
+func _ignore_mouse(n):
+	if n is Control:
+		n.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for c in n.get_children():
+		_ignore_mouse(c)
 
 
 func _on_back_pressed():
@@ -1323,16 +1545,17 @@ func _update_status():
 		if desynced:
 			s += "  |  OUT OF SYNC: won't count"
 		if pick_pending and is_instance_valid(game) and not game.p1.state_interruptable:
-			r.append("bot is thinking...")
+			r.append("bot: thinking...")
 		if shown_estimate != null:
-			r.append("bot's estimate: %d%% for the bot" % int(shown_estimate))
-		if depth_text != "":
-			r.append("bot thought: %s" % depth_text)
+			r.append("est. %d%% for the bot" % int(shown_estimate))
+		if _deep_label(depth_text) != "":
+			r.append(_deep_label(depth_text))
 	status.text = s
 	status_r.text = PoolStringArray(r).join("  |  ")
 
 
-# Host: no "bot is thinking": as online, the game's own timer bar and sound say when the other side locked in.
+# Host: the bot's status from the game's own turn-ready flags (Network.turns_ready: THAT a player locked in, what online
+# play shows as "Ready"), never its move.
 func _update_host_status():
 	var s = "YomiBench vs %s" % bot_name("?") if not server.empty() else "YomiBench: starting the bot's game..."
 	if server.empty() and wait_text != "":
@@ -1342,12 +1565,52 @@ func _update_host_status():
 		s += "  |  game %d, turn %d" % [games_played + 1, turn]
 		if remote_status.get("desynced", false) or desynced:
 			s += "  |  OUT OF SYNC: won't count"
+		var b = bot_status()
+		if b != "":
+			r.append(b)
 		if remote_status.get("estimate") != null:
-			r.append("bot's estimate: %d%% for the bot" % int(remote_status.estimate))
-		if str(remote_status.get("depth", "")) != "":
-			r.append("bot thought: %s" % str(remote_status.depth))
+			r.append("est. %d%%" % int(remote_status.estimate))
+		if _deep_label(str(remote_status.get("depth", ""))) != "":
+			r.append(_deep_label(str(remote_status.depth)))
 	status.text = s
 	status_r.text = PoolStringArray(r).join("  |  ")
+
+
+# Host, a turn open: "bot: thinking...", "bot: locked in", or untimed once you locked in, "bot: finishing... N s" (the
+# after-lock cap: the bot answers within lock_cap_s of your lock-in). "" when no turn is waiting on the players.
+func bot_status():
+	if not is_instance_valid(game) or game.game_finished or not game.game_paused or decision_tick != game.current_tick:
+		return ""
+	var ready = Network.turns_ready if typeof(Network.turns_ready) == TYPE_DICTIONARY else {}
+	if ready.get(2, false):
+		return "bot: locked in"
+	var untimed = not is_instance_valid(main) or main.ui_layer == null or str(main.ui_layer.timer_mode) == "none"
+	if ready.get(1, false) and untimed and lock_cap_s > 0:
+		var left = lock_cap_s - (OS.get_ticks_msec() - p1_lock_msec) / 1000.0
+		return "bot: finishing... %d s" % int(ceil(max(0.0, left)))
+	return "bot: thinking..."
+
+
+# The bot's search depth in plain words, only when it went beyond its full search ("searched deep"); "" otherwise.
+func _deep_label(d):
+	return "searched deep" if str(d).begins_with("2-decision") or str(d) == "widened" else ""
+
+
+# The game's pause menu (Escape) sits under our layer: our panel and card step aside while it is open.
+func _pause_menu_frame():
+	var m = main if is_instance_valid(main) else get_tree().current_scene
+	var pp = m.get_node_or_null("%PausePanel") if m != null and m.has_method("_on_match_ready") else null
+	var open = pp != null and pp.is_visible_in_tree()
+	if open and pause_hid.empty():
+		for c in [panel, card]:
+			if c != null and c.visible:
+				c.hide()
+				pause_hid.append(c)
+	elif not open and not pause_hid.empty():
+		for c in pause_hid:
+			if is_instance_valid(c):
+				c.show()
+		pause_hid = []
 
 
 # Whether the bottom bar may show: not while our panel is up (it says the same, and on the main menu the bar would
@@ -1357,6 +1620,8 @@ func _status_room():
 	if autoplay:
 		return true
 	if panel != null and panel.visible:
+		return false
+	if card != null and card.visible:
 		return false
 	var m = get_tree().current_scene
 	if m == null or not m.has_method("_on_match_ready"):

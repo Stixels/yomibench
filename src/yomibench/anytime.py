@@ -22,6 +22,13 @@ best-so-far mix (`MatrixBot.progress`), so the answer is, by preference:
 
 When the deadline doesn't hit, the answer is exactly the plain search's.
 
+**The after-lock cap** (no turn timer, since private build v5): the bot thinks while the human decides, and once
+the human locks in it has at most LOCK_CAP_S (10 s) more (`Clock.lock_cap`). A search that finishes earlier answers
+at once (a cap, not a minimum). If the cap cuts the production search, its best-so-far mix is played
+(`partial-full`, as for a deadline), the quick search only if it solved no round by LOCK_CAP_S less the emergency
+margin after the lock-in, and Continue if not even that finished. Timed decisions never get it: their turn deadline
+(above) is unchanged.
+
 **Think until I lock in** (on by default since private build v4: the bot uses the human's thinking time): the
 bot answers a decision with the deepest search it finished before it had to stop, at the latest THINK_CAP_S
 after the decision opened (configurable; a cap on the extra stages only, so an untimed game never waits on
@@ -86,6 +93,8 @@ EMERGENCY_FRACTION = 0.15
 # Thinking until lock-in stops its extra stages this long after the decision opened even if the human hasn't locked
 # in (human_play --think-cap). A soft stop: the production search before them always finishes.
 THINK_CAP_S = 60.0
+# No turn timer: once the human locks in, the bot has at most this much longer to answer (human_play --lock-cap).
+LOCK_CAP_S = 10.0
 PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed answer (human play logs it per turn)
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
 # The match settings that are the game's turn clock, not the simulation (ui/UILayer.gd and main.gd
@@ -95,7 +104,7 @@ TIMER_KEYS = ("timer_mode", "turn_time", "turn_min_length", "increment_starting_
 
 
 class Stopped(Exception):
-    """A stop check fired; `why` is "lock-in", "deadline", "superseded" or "emergency"."""
+    """A stop check fired; `why` is "lock-in", "deadline", "lock-cap", "superseded" or "emergency"."""
 
     def __init__(self, why: str):
         super().__init__(why)
@@ -121,6 +130,10 @@ class Clock:
         self.emergency_at = emergency_at
         # Thinking until lock-in: when its extra stages stop even without a lock-in (a soft stop: THINK_CAP_S).
         self.cap_at: float | None = None
+        # No turn timer: the after-lock cap (LOCK_CAP_S). Once the human locks in, a hard stop `lock_cap` seconds
+        # later ("lock-cap"), with an emergency point before it. Read lazily from `soft_at`, so a lock-in that
+        # arrives before the decision set this still counts. Ignored while `hard_at` (a turn deadline) is set.
+        self.lock_cap: float | None = None
         self.t0 = time.monotonic()
         self._soft, self._hard = threading.Event(), threading.Event()
         self._soft_why = self._hard_why = ""
@@ -128,6 +141,14 @@ class Clock:
         # The running stage's work so far (reset by `run` per stage; Guarded/GuardedValue add to it after
         # each call returns): logged per stage, finished or cut. Counting only: no extra compute.
         self.work: dict[str, int] = new_work()
+        # The longest single guarded step (a preview chunk, a value batch, an expand, a continue) this decision: the
+        # after-lock cap stops before a step that would end past it, so the answer comes by the cap, not one step
+        # later. (A turn deadline keeps its margin instead: unchanged.)
+        self.step_s = 0.0
+
+    def note_step(self, seconds: float) -> None:
+        if seconds > self.step_s:
+            self.step_s = seconds
 
     def signal(self, kind: str) -> None:
         """A notification for this decision: `locked_in` (soft) or `deadline` (hard)."""
@@ -148,9 +169,29 @@ class Clock:
             return self._hard_why
         if self.hard_at is not None and time.monotonic() >= self.hard_at:
             return "deadline"
+        at = self.lock_hard_at()
+        if at is not None and time.monotonic() + self.step_s >= at:
+            return "lock-cap"
         if self.superseded is not None and self.superseded():
             return "superseded"
         return None
+
+    def lock_hard_at(self) -> float | None:
+        """The after-lock cap's hard stop (monotonic), once the human has locked in; None without one."""
+        if self.lock_cap is None or self.hard_at is not None or self.soft_at is None:
+            return None
+        return self.soft_at + self.lock_cap
+
+    def emergency(self) -> float | None:
+        """When a production search that has solved nothing yet gives way to the quick search: the turn
+        deadline's emergency point, else the after-lock cap's (its LOCK_CAP_S less the emergency margin)."""
+        if self.emergency_at is not None:
+            return self.emergency_at
+        at = self.lock_hard_at()
+        if at is None:
+            return None
+        assert self.lock_cap is not None
+        return at - self.lock_cap + emergency_within(self.lock_cap, self.lock_cap)
 
     def soft(self) -> str | None:
         why = self.hard() or (self._soft_why if self._soft.is_set() else None)
@@ -273,11 +314,12 @@ class Guarded:
     reads and writes (turn_cache, stats, match_seed) go to the engine itself."""
 
     def __init__(self, engine: Engine, check: Callable[[], None], chunk: int = PREVIEW_CHUNK,
-                 work: dict[str, int] | None = None):
+                 work: dict[str, int] | None = None, step: Callable[[float], None] | None = None):
         object.__setattr__(self, "_engine", engine)
         object.__setattr__(self, "_check", check)
         object.__setattr__(self, "_chunk", max(1, chunk))
         object.__setattr__(self, "_work", work if work is not None else new_work())
+        object.__setattr__(self, "_step", step or (lambda _s: None))  # each step's duration (Clock.note_step)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._engine, name)
@@ -290,20 +332,26 @@ class Guarded:
         for k in range(0, len(pairs), self._chunk):
             self._check()
             chunk = pairs[k:k + self._chunk]
+            t = time.monotonic()
             out += self._engine.preview(chunk, candidates)
+            self._step(time.monotonic() - t)
             self._work["previews"] += len(chunk)
         return out
 
     def expand(self, specs: list[dict[str, Any]]) -> list[Candidate | str]:
         self._check()
+        t = time.monotonic()
         out = self._engine.expand(specs)
+        self._step(time.monotonic() - t)
         self._work["expands"] += len(specs)
         return out
 
     def continue_from(self, handle: int, pair: tuple[int, int] | None = None, until: Any = "decision",
                       candidates: bool = True) -> Observation:
         self._check()
+        t = time.monotonic()
         out = self._engine.continue_from(handle, pair, until, candidates)
+        self._step(time.monotonic() - t)
         self._work["continues"] += 1
         return out
 
@@ -313,9 +361,11 @@ class GuardedValue:
     `chunk` splits batches (stages 2-4); None keeps each batch whole (stage 1: bit-identical)."""
 
     def __init__(self, value: Callable[[dict[str, Any], int], float], check: Callable[[], None],
-                 chunk: int | None = None, work: dict[str, int] | None = None):
+                 chunk: int | None = None, work: dict[str, int] | None = None,
+                 step: Callable[[float], None] | None = None):
         self.value, self.check, self.chunk = value, check, chunk
         self.work = work if work is not None else new_work()
+        self.step = step or (lambda _s: None)  # each batch's duration (Clock.note_step)
         self.__name__ = getattr(value, "__name__", repr(value))
         if getattr(value, "batch", None) is not None:
             self.batch = self._batch
@@ -329,7 +379,9 @@ class GuardedValue:
     def _batch(self, states: list[dict[str, Any]], seat: int) -> Any:
         if not self.chunk:
             self.check()
+            t = time.monotonic()
             res = self.value.batch(states, seat)
+            self.step(time.monotonic() - t)
             self.work["positions"] += len(states)
             self.work["value_batches"] += 1
             return res
@@ -337,7 +389,9 @@ class GuardedValue:
         for k in range(0, len(states), self.chunk):
             self.check()
             part = states[k:k + self.chunk]
+            t = time.monotonic()
             out += map(float, self.value.batch(part, seat))
+            self.step(time.monotonic() - t)
             self.work["positions"] += len(part)
         self.work["value_batches"] += 1
         return out
@@ -423,9 +477,9 @@ class Deepener:
         production search's lists or previews."""
         check = self.clock.check_hard
         b = self.bot.cheap()
-        b.value = GuardedValue(self.bot.value, check, VALUE_CHUNK, self.clock.work)
+        b.value = GuardedValue(self.bot.value, check, VALUE_CHUNK, self.clock.work, step=self.clock.note_step)
         self.keep.append(b.value)
-        eng = Guarded(self.engine, check, work=self.clock.work)
+        eng = Guarded(self.engine, check, work=self.clock.work, step=self.clock.note_step)
         base = [cap_candidates(c, QUICK_CAP, QUICK_POLICY, f"{self.engine.match_seed}:{self.obs.turn}:{s}")
                 for s, c in enumerate(self.obs.candidates)]
         shared, private = self.engine.turn_cache, {"base": base}
@@ -444,9 +498,9 @@ class Deepener:
                 chunk: int | None, progress: Callable[..., None] | None = None) -> Answer:
         b = copy.copy(bot)
         b.progress = progress
-        b.value = GuardedValue(bot.value, check, chunk, self.clock.work)
+        b.value = GuardedValue(bot.value, check, chunk, self.clock.work, step=self.clock.note_step)
         self.keep.append(b.value)
-        eng = Guarded(self.engine, check, work=self.clock.work)
+        eng = Guarded(self.engine, check, work=self.clock.work, step=self.clock.note_step)
         row, col, value = b.search_turn(self.obs, eng, self.seat)  # type: ignore[arg-type]
         key = b._key(self.seat)
         lists = turn_candidates(self.obs, eng, key)  # type: ignore[arg-type]
@@ -456,7 +510,7 @@ class Deepener:
     def production(self) -> Answer:
         def check() -> None:
             self.clock.check_hard()
-            at = self.clock.emergency_at
+            at = self.clock.emergency()
             if at is not None and self.partial is None and time.monotonic() >= at:
                 raise Stopped("emergency")
 
@@ -526,8 +580,8 @@ class Deepener:
         if base is None:
             return None
         check = self.clock.check_soft
-        value = GuardedValue(self.bot.value, check, VALUE_CHUNK, self.clock.work)
-        eng = Guarded(self.engine, check, work=self.clock.work)
+        value = GuardedValue(self.bot.value, check, VALUE_CHUNK, self.clock.work, step=self.clock.note_step)
+        eng = Guarded(self.engine, check, work=self.clock.work, step=self.clock.note_step)
         lists, row, col = base.lists, base.row, base.col
         evaluate = self._leaf_values(base, value, eng)
         n0, n1 = len(lists[0]), len(lists[1])
@@ -564,7 +618,7 @@ Stage = tuple[int, Callable[[Answer | None], "Answer | None"], bool]  # (number,
 @dataclass
 class Outcome:
     best: Answer | None              # the answer to play (None: nothing finished: P2 holds with Continue)
-    stopped: str                     # "lock-in", "deadline", "superseded", "emergency", "think-cap" or "done"
+    stopped: str                     # "lock-in", "deadline", "lock-cap", "superseded", "emergency", "think-cap" or "done"
     trace: list[dict[str, Any]]      # per stage tried: stage, name, ms, and how it ended
     production: Answer | None        # the production search's answer, if it finished
     path: str = "full"               # one of PATHS: what produced `best`

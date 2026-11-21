@@ -15,6 +15,14 @@ def _zip(tmp_path) -> zipfile.ZipFile:
     return zipfile.ZipFile(build_vsbot_mod.build(tmp_path))
 
 
+def _func(src: str, head: str) -> str:
+    """The body of the GDScript function that starts with `head` (up to the next top-level func)."""
+    return src.split(head, 1)[1].split("\nfunc ", 1)[0].split("\nstatic func ", 1)[0]
+
+
+HUMAN = ROOT / "mod" / "YomiBench" / "YomiHuman.gd"
+
+
 def test_the_zip_carries_every_script_the_client_copy_runs(tmp_path):
     # VsBot.gd copies CLIENT_SCRIPTS out of res://YomiBenchVsBot/ into the headless copy's folder.
     listed = re.search(r"const CLIENT_SCRIPTS = \[([^\]]*)\]", (MOD / "VsBot.gd").read_text()).group(1)
@@ -55,8 +63,12 @@ def test_a_mid_match_bot_crash_says_so_on_both_routes():
     human = (ROOT / "mod" / "YomiBench" / "YomiHuman.gd").read_text()
     vsbot = (MOD / "VsBot.gd").read_text()
     client = (MOD / "MpClient.gd").read_text()
-    text = "The bot crashed (log: %s). Go back to the main menu and start a new match."
-    assert text in human and 'server_file("bot-server.log")' in human
+    # v5: the action first, then the log as the README names it (short, no user name on screen), and a button
+    text = "The bot stopped. Go back to the main menu to start again."
+    assert text in human and "%USERPROFILE%" in _func(human, "static func crash_text():")
+    assert 'log_btn.text = "Open log folder"' in human and "OS.shell_open(" in human
+    crash = _func(human, "func bot_crashed(")
+    assert "log_btn.show()" in crash and "_ignore_mouse(p1_panel)" in crash and 'side == "host"' in crash
     # Start-menu route (single): a lost connection is the crash message, never the old bare "Lost the bot server."
     assert "Lost the bot server" not in human and "bot_crashed()" in human
     # a dead server sends nothing: the connection is read once a second even with nothing waiting
@@ -79,8 +91,9 @@ def test_the_bottom_bar_stays_out_of_the_games_own_bottom_row():
     assert '"%OptionsBar"' in room and "panel.visible" in room and "ui.visible" in room
     upd = human.split("func _update_status():", 1)[1].split("\nfunc ", 1)[0]
     assert upd.index("_status_room()") < upd.index("if crashed")  # also hidden after a crash, under the panel
-    # the estimate and depth go to the right half, never onto the left one
-    assert "bot's estimate" not in "".join(line for line in human.splitlines() if "s +=" in line)
+    # the estimate and the bot's status go to the right half, never onto the left one
+    assert "est. " not in "".join(line for line in human.splitlines() if "s +=" in line)
+    assert "card.visible" in room  # and under the result card
 
 
 def test_the_panel_waits_for_the_bot_and_names_it_as_the_guides_do():
@@ -96,3 +109,93 @@ def test_the_panel_waits_for_the_bot_and_names_it_as_the_guides_do():
     assert 'phase == "ended" or (phase == "idle" and is_instance_valid(main) and is_instance_valid(main.game))' in human
     # nobody to chat with: the game's chat box is closed when a bot match starts (host side)
     assert 'main.get_node_or_null("%ChatWindow")' in human
+
+
+# --- private build v5 (the UX proposal and the untimed after-lock cap) ------------------------------------------
+
+def test_lock_in_reaches_the_server_in_every_match_and_carries_only_the_turn():
+    """The untimed after-lock cap counts from the lock-in, so `locked_in` goes out whatever "Bot uses your thinking
+    time" says (v4 sent it only with that box ticked). Every one carries exactly its type and the turn."""
+    human = HUMAN.read_text()
+    sends = [line.strip() for line in human.splitlines() if '"locked_in"' in line and "_notify(" in line]
+    assert len(sends) == 3
+    for line in sends:
+        assert line.endswith('_notify({"type": "locked_in", "turn": pending_turn})') or \
+            line.startswith('_notify({"type": "locked_in", "turn": pending_turn})'), line
+    for head in ("func _on_net_turn_ready(", "func _on_input(", "func _decision("):
+        body = _func(human, head)
+        assert "locked_in" in body and "think_on and" not in body, head
+
+
+def test_the_bot_status_on_the_players_side_never_shows_its_move():
+    """Item 2: thinking / locked in / finishing... N s, from the game's own turn-ready flags only (what online play
+    shows as an opponent's Ready) and the lock-in time; nothing of the bot's pick or the remote status."""
+    human = HUMAN.read_text()
+    body = _func(human, "func bot_status():")
+    for text in ('"bot: locked in"', '"bot: thinking..."', '"bot: finishing... %d s"', "Network.turns_ready",
+                 "lock_cap_s", "p1_lock_msec", 'timer_mode) == "none"'):
+        assert text in body, text
+    for leak in ("queued_action", "action_inputs", "ghost", "remote_status", "pick"):
+        assert leak not in body, leak
+    assert "bot_status()" in _func(human, "func _update_host_status():")
+    # the cap's length comes from the server's hello
+    assert 'lock_cap_s = float(r.lock_cap_s)' in _func(human, "func _on_hello(r):")
+
+
+def test_a_forfeit_ends_in_a_result():
+    """Item 3: the game's forfeit ends the match without game_ended and starts its post-game replay (a new
+    main.game), which v4 read as the match being closed. The forfeit is checked first, every frame."""
+    human = HUMAN.read_text()
+    frame = _func(human, "func _play_frame():")
+    assert frame.index("_forfeit_by()") < frame.index('_abort("the match was closed")')
+    by = _func(human, "func _forfeit_by():")
+    assert "Network.forfeiter" in by and "game.forfeit_player" in by
+    ff = _func(human, "func _on_forfeit(who):")
+    assert "_send_end(2 - who, who - 1)" in ff  # the other player wins; `forfeit` is the forfeiter's seat
+    assert 'msg["forfeit"] = forfeit_seat' in _func(human, "func _send_end(")
+    assert "You forfeited: the bot wins." in human
+    # a new match clears the game's forfeit state, as its own rematch does
+    assert "Network.forfeiter = 0" in _func(human, "func _launch(")
+
+
+def test_the_result_card_waits_for_the_final_hit_and_offers_three_ways_on():
+    """Item 5: a small card 1.5 s after the match ends, with Rematch (the last match again), Change settings and
+    Main menu; Rematch waits for the bot's record of the game."""
+    human = HUMAN.read_text()
+    assert "const CARD_DELAY_MS = 1500" in human
+    card = _func(human, "func _make_card(theme):")
+    for b in ('"Rematch"', '"Change settings"', '"Main menu"'):
+        assert b in card, b
+    assert "if hosted:" in card  # Main menu only from the game's menu (the Start-menu app has no menu to go to)
+    assert "last_msg.duplicate(true)" in _func(human, "func _on_rematch_pressed():")
+    assert "not result_in" in _func(human, "func _on_rematch_pressed():")
+    assert "ended_msec = OS.get_ticks_msec()" in _func(human, "func _on_host_game_ended(")
+    assert "Saved to Documents" in _func(human, "func _show_result(r):")
+
+
+def test_plain_words_on_the_panel():
+    """Item 6: the renames (the untimed meaning of the think box changed with the cap)."""
+    human = HUMAN.read_text()
+    for new in ('"Bot uses your thinking time"', '"Turn timer (ranked clock)"', '"Bot style:"',
+                '"unpredictable (mixes its moves)"', '"strongest move only"', '"You vs %s (local)"'):
+        assert new in human, new
+    for old in ("Bot thinks until you lock in", "the game's online timer; ranked: on", "samples its strategy)\"",
+                "over this PC only", '"bot thought: %s"'):
+        assert old not in human, old
+
+
+def test_our_panel_steps_aside_for_the_pause_menu_and_the_chat_stays_closed():
+    """Items 7 and 13: the panel and card hide while the game's pause menu is open; the chat box is closed once per
+    game, the post-game replay (a new main.game) too, so Enter still opens it."""
+    human = HUMAN.read_text()
+    pause = _func(human, "func _pause_menu_frame():")
+    assert '"%PausePanel"' in pause and "pause_hid" in pause and "[panel, card]" in pause
+    assert "_pause_menu_frame()" in _func(human, "func _process(_delta):")
+    proc = _func(human, "func _process(_delta):")
+    assert "main.game != chat_game" in proc and "chat.hide()" in proc
+
+
+def test_the_logs_are_named_as_the_readme_names_them():
+    vsbot = (MOD / "VsBot.gd").read_text()
+    assert "static func _short_path(p):" in vsbot and '["APPDATA", "USERPROFILE"]' in vsbot
+    assert "_short_path(HUMAN.server_file(\"bot-server.log\"))" in vsbot

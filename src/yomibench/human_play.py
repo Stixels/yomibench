@@ -31,11 +31,19 @@ simulation: they are never sent to the sim.
 Each decision's log line says what produced the bot's move (`bot.path`: full, partial-full, quick or
 continue), with its think time and the clock it left (`bot.clock`); the result line counts the paths.
 
-Think until lock-in (option `think_until_lockin`, default on): the bot finishes its full search,
-then keeps deepening it (yomibench.anytime) until the human locks in, or `think_cap` seconds (default 60)
-after the decision opened, whichever is first. The mod tells the server only
+Think until lock-in (option `think_until_lockin`, default on; the panel's "Bot uses your thinking time"): the bot
+finishes its full search, then keeps deepening it (yomibench.anytime) until the human locks in, or `think_cap`
+seconds (default 60) after the decision opened, whichever is first. The mod tells the server only
 THAT the human locked in, with a one-way `{"type": "locked_in", "turn": N}` (no reply); a timer's
 `deadline` likewise. Those carry only type and turn, and anything more is refused whole.
+
+The after-lock cap (no turn timer, since private build v5; `lock_cap`, default 10 s): once the human locks in, the
+bot has at most `lock_cap` seconds more. A search that finishes sooner answers at once; one the cap cuts plays its
+best so far (`partial-full`). The mod sends `locked_in` in every untimed match for this, whatever the option says.
+Timed decisions keep their turn deadline only.
+
+A forfeit (the game's pause menu): the mod's `end` carries `forfeit: 0` (P1, the human, forfeited) and the winner;
+the game is recorded as finished (`reason` "forfeit"), the sim's position as it was (its match never ended).
 
 Per game the server writes `<out>/games/<game id>.jsonl`: a header, one line per decision (the sim
 state, the sync check, the bot's strategy over its candidates and its value, its pick, both actual
@@ -392,6 +400,8 @@ class Game:
         self.timer: anytime.GameTimer | None = None  # the bot's turn clock (None: no turn timer)
         self.turn_s: float | None = None  # one turn of the match's turn timer: every answer's ceiling
         self.deadline_hits = 0  # decisions whose deadline cut the production search
+        self.lock_cap_hits = 0  # untimed decisions whose after-lock cap cut the production search
+        self.untimed_locked = 0  # untimed stoppable decisions the human locked in during (the cap could apply)
         self.paths: dict[str, int] = {}  # what produced each searched move (anytime.PATHS): count per path
         self.file = open(path, "w", encoding="utf-8", newline="\n")
 
@@ -417,7 +427,7 @@ class Session:
                  schedule: list[tuple[str, str, int]] | None = None, mode: str = "human", scene: str | None = None,
                  model: dict[str, Any] | None = None, pick: str = "mixed", show_estimate: bool = False,
                  settings: str = "standard", think_until_lockin: bool = True, turn_timer: bool | None = None,
-                 think_cap: float = anytime.THINK_CAP_S,
+                 think_cap: float = anytime.THINK_CAP_S, lock_cap: float = anytime.LOCK_CAP_S,
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
                  deadline_fraction: float = anytime.DEADLINE_FRACTION, log: Callable[[str], None] = print,
                  engine_spec: str | None = None):
@@ -431,6 +441,9 @@ class Session:
         if not think_cap > 0:
             raise ValueError(f"the think cap must be > 0 s: {think_cap}")
         self.think_cap = float(think_cap)
+        if not lock_cap > 0:
+            raise ValueError(f"the after-lock cap must be > 0 s: {lock_cap}")
+        self.lock_cap = float(lock_cap)
         self.bot = make_bot(bot_spec)
         if getattr(self.bot, "playout_cap", None):  # human play always searches full turns
             raise ValueError(f"{bot_spec}: human play searches every turn in full; drop the @cheap option")
@@ -504,7 +517,7 @@ class Session:
             raise ValueError(f"the mod speaks protocol {msg.get('protocol')!r}, this server {PROTOCOL}")
         return {"type": "hello", "protocol": PROTOCOL, "bot": self.label, "candidate_set": self.candidate_set,
                 "characters": list(self.characters), "mode": self.mode, "options": dict(self.options),
-                "pick_styles": list(PICK_STYLES), "settings_presets": self.presets,
+                "pick_styles": list(PICK_STYLES), "settings_presets": self.presets, "lock_cap_s": self.lock_cap,
                 "settings_refused": self.presets_refused, "next": self._next()}
 
     def settings_like(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -689,6 +702,8 @@ class Session:
             clock.emergency_at = clock.t0 + anytime.emergency_within(available, within)
         if clock.cap_at is None:  # thinking until lock-in never runs past this, timer or not
             clock.cap_at = clock.t0 + self.think_cap
+        if available is None:  # no turn timer: at most lock_cap seconds after the human locks in
+            clock.lock_cap = self.lock_cap
         pending = g.pending
         try:
             return self._decide(g, msg, turn, clock, available)
@@ -720,10 +735,10 @@ class Session:
         t = time.perf_counter()
         depth = None
         think = bool(g.options.get("think_until_lockin"))
-        if ((think or available is not None) and len(obs.candidates[BOT_SEAT]) > 1
+        if ((think or available is not None or clock.lock_cap is not None) and len(obs.candidates[BOT_SEAT]) > 1
                 and isinstance(self.bot, anytime.MatrixBot)):
-            # A turn timer or thinking until lock-in: the stoppable search (with no deadline hit and
-            # no deeper stage finished, its answer is the plain search's bit for bit).
+            # A turn timer, the after-lock cap or thinking until lock-in: the stoppable search (with no deadline
+            # or cap hit and no deeper stage finished, its answer is the plain search's bit for bit).
             bot_info, depth = self._anytime(g, obs, clock, deep=think, available=available)
         else:
             bot_info = self._think(g, obs)
@@ -792,11 +807,19 @@ class Session:
                                  "work": work,
                                  "lock_in_ms": lock_ms, "deep": deep,
                                  "deadline_s": None if clock.hard_at is None else round(clock.hard_at - clock.t0, 3),
+                                 "lock_cap_s": clock.lock_cap,
                                  "timer_available_s": None if available is None else round(available, 3),
                                  "answered_s": round(time.monotonic() - clock.t0, 3)}
-        if out.production is None and out.stopped in ("deadline", "emergency"):
+        played = {"partial-full": "the full search's best so far", "quick": "the emergency quick search"}
+        if available is None and clock.soft_at is not None:
+            g.untimed_locked += 1
+        if out.production is None and available is None and out.stopped in ("lock-cap", "emergency"):
+            g.lock_cap_hits += 1
+            notes["lock_cut"] = True
+            self.log(f"game {g.id}: turn {obs.turn}: the {clock.lock_cap:g} s after-lock cap cut the full search; "
+                     f"played {played.get(out.path, 'Continue')}")
+        elif out.production is None and out.stopped in ("deadline", "emergency"):
             g.deadline_hits += 1
-            played = {"partial-full": "the full search's best so far", "quick": "the emergency quick search"}
             self.log(f"game {g.id}: turn {obs.turn}: the deadline ({notes['deadline_s']} s) cut the full search; "
                      f"played {played.get(out.path, 'Continue')}")
         if best is None:  # nothing finished by the deadline: P2 holds (Continue)
@@ -820,6 +843,23 @@ class Session:
     def _on_end(self, msg: dict[str, Any]) -> dict[str, Any]:
         g = self._need_game()
         turn = int(msg.get("turn", g.turns))
+        forfeit = msg.get("forfeit")
+        if forfeit not in (None, 0, 1) or isinstance(forfeit, bool):
+            raise ValueError(f"forfeit must be 0 (P1), 1 (P2) or absent, not {forfeit!r}")
+        if forfeit is not None:
+            # The game ended on a forfeit (its pause menu): the forfeiter's last input is the game's own Forfeit,
+            # which the sim doesn't play. The sim's match stays where the last turn left it.
+            winner = msg.get("winner", 1 - forfeit)
+            if winner != 1 - forfeit:
+                raise ValueError(f"a forfeit by {forfeit} is won by {1 - forfeit}, not {winner!r}")
+            if g.pending is not None:
+                g.pending["inputs"] = msg.get("inputs")
+                g.pending["forfeit"] = forfeit
+                g.write(g.pending)
+                g.pending = None
+            summary = self._finish(winner, "finished", "forfeit", final=msg.get("snapshot"), forfeit=forfeit)
+            return {"type": "result", **{k: summary[k] for k in ("game", "result", "valid", "turns", "desync")},
+                    "forfeit": forfeit, "log": str(g.path), "ledger": str(self.ledger_path), "next": self._next()}
         self._apply_inputs(g, msg)
         sync = self._check(g, msg.get("snapshot"), turn)
         if g.sim_error is None and g.obs is not None and not g.obs.done:
@@ -854,7 +894,7 @@ class Session:
             self._finish(None, "abandoned", "the game disconnected")
 
     def _finish(self, winner: int | None, how: str, reason: str | None, sync: dict[str, Any] | None = None,
-                final: dict[str, Any] | None = None) -> dict[str, Any]:
+                final: dict[str, Any] | None = None, forfeit: int | None = None) -> dict[str, Any]:
         g = self.game
         assert g is not None
         self.game = None
@@ -875,7 +915,8 @@ class Session:
             "final_tick": (final or {}).get("tick"),
             "final_hp": [p.get("hp") for p in (final or {}).get("players", [])] or None,
             "p2_overrides": g.p2_overrides, "p2_fallbacks": g.p2_fallbacks, "reason": reason,
-            "deadline_hits": g.deadline_hits, "paths": dict(g.paths),
+            "deadline_hits": g.deadline_hits, "paths": dict(g.paths), "forfeit": forfeit,
+            "lock_cap_hits": g.lock_cap_hits, "untimed_locked": g.untimed_locked,
             "think_ms_mean": _round(sum(g.think_ms) / len(g.think_ms), 1) if g.think_ms else None,
             "think_ms_max": _round(max(g.think_ms), 1) if g.think_ms else None,
             "seconds": round(time.time() - g.t0, 1),
@@ -901,6 +942,7 @@ class Session:
                    "matchups": [matchup], "ratings": None,
                    **{k: s[k] for k in ("result", "valid", "turns", "desync", "desync_turns", "characters", "seed",
                                         "final_tick", "final_hp", "p2_overrides", "p2_fallbacks", "deadline_hits",
+                                        "lock_cap_hits", "forfeit",
                                         "think_ms_mean", "think_ms_max", "seconds")},
                    "bot_seat": "p2", "candidate_set": self.candidate_set,
                    "candidate_rules": self.hello.get("candidate_rules"), "sim_winner": s["sim_winner"]}
@@ -1109,6 +1151,9 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--think-cap", type=float, default=anytime.THINK_CAP_S, metavar="SECONDS",
                     help="thinking until lock-in stops this long after a turn opens even if you haven't locked in "
                          f"(default {anytime.THINK_CAP_S:g}; a timed turn's deadline comes first)")
+    ap.add_argument("--lock-cap", type=float, default=anytime.LOCK_CAP_S, metavar="SECONDS",
+                    help="no turn timer: once you lock in, the bot answers within this many seconds (its best so far "
+                         f"if its search hasn't finished; default {anytime.LOCK_CAP_S:g}; timed turns keep their deadline)")
     ap.add_argument("--engine", default=None, metavar="sim|game-pool:N|game-pool:auto",
                     help="the bot's engine: a simulator plugin (sim) or N headless copies of your own game (game-pool, sized to "
                          "this PC with auto). Default: sim when it is installed, else game-pool:auto")
@@ -1154,7 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
                       mode="autoplay" if schedule else "human", model=bot.model,
                       pick=args.pick, show_estimate=args.show_estimate,
                       settings=args.settings, think_until_lockin=args.think_until_lockin, think_cap=args.think_cap,
-                      turn_timer=None if args.turn_timer is None else args.turn_timer == "on",
+                      lock_cap=args.lock_cap, turn_timer=None if args.turn_timer is None else args.turn_timer == "on",
                       deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
                       engine_spec=args.engine)
     server = Server(session, args.port, args.host)

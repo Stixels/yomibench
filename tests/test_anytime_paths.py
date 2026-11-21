@@ -151,3 +151,82 @@ def test_thinking_until_lock_in_stops_at_its_cap_but_never_cuts_the_full_search(
     out = anytime.think(_slow_bot(0.001), obs, 1, e, clock, deep=True)
     assert out.production is not None and out.best is out.production and out.path == "full"
     assert out.stopped == "think-cap"
+
+
+# --- the after-lock cap (no turn timer, private build v5) ------------------------------------------------------
+
+def _locked_clock(cap: float, locked_ago: float = 0.0) -> Clock:
+    clock = Clock(0)
+    clock.lock_cap = cap
+    clock.signal("locked_in")
+    clock.soft_at -= locked_ago
+    return clock
+
+
+def test_no_lock_in_means_no_cap():
+    clock = Clock(0)
+    clock.lock_cap = 0.01
+    assert clock.lock_hard_at() is None and clock.emergency() is None and clock.hard() is None
+
+
+def test_the_cap_counts_from_the_lock_in_even_if_it_arrived_before_the_cap_was_set():
+    clock = Clock(0)
+    clock.signal("locked_in")  # the reader thread signalled before the decision set its cap
+    clock.lock_cap = 10.0
+    assert clock.lock_hard_at() == pytest.approx(clock.soft_at + 10.0)
+    assert clock.emergency() == pytest.approx(clock.soft_at + 8.5)  # LOCK_CAP_S less the 1.5 s emergency margin
+    assert anytime.LOCK_CAP_S == 10.0
+
+
+def test_a_turn_deadline_wins_over_the_cap():
+    clock = Clock(0, hard_at=time.monotonic() + 100)
+    clock.lock_cap = 0.01
+    clock.signal("locked_in")
+    time.sleep(0.02)
+    assert clock.lock_hard_at() is None and clock.hard() is None  # timed: only the deadline
+
+
+def test_the_cap_cuts_the_full_search_and_plays_its_best_so_far(quick_calls):
+    e, obs = _toy_position()
+    clock = Clock(0)
+    clock.lock_cap = 0.3
+    t0 = time.monotonic()
+    import threading
+
+    threading.Timer(0.1, clock.signal, args=("locked_in",)).start()
+    out = anytime.think(_RoundsBot(every=0.03), obs, 1, e, clock, deep=False)
+    took = time.monotonic() - t0
+    assert out.production is None and out.stopped == "lock-cap" and out.path == "partial-full"
+    assert not quick_calls and 0.38 <= took < 0.7  # the lock-in at 0.1 s, then the 0.3 s cap
+
+
+def test_the_cap_plays_the_quick_answer_only_if_nothing_was_solved(quick_calls):
+    e, obs = _toy_position()
+    clock = _locked_clock(0.4)
+    out = anytime.think(_slow_bot(0.2), obs, 1, e, clock, deep=False)  # its first round takes seconds
+    assert out.path == "quick" and out.stopped == "emergency" and len(quick_calls) == 1
+
+
+def test_a_search_that_ends_before_the_cap_answers_at_once():
+    e, obs = _toy_position()
+    clock = _locked_clock(30.0)
+    t0 = time.monotonic()
+    out = anytime.think(MatrixBot(search="oracle"), obs, 1, e, clock, deep=True)
+    assert out.path == "full" and out.production is not None and time.monotonic() - t0 < 5
+    assert out.stopped == "lock-in"  # the extra stages stop at the lock-in; the cap is never waited out
+
+
+def test_the_cap_stops_before_a_step_that_would_end_past_it():
+    """Production's value batches are never split (its answers stay the plain search's), so the cap stops before a
+    step as long as the longest one so far would cross it: the answer comes by the cap, not a batch later."""
+    clock = _locked_clock(10.0, locked_ago=7.0)  # 3 s left
+    assert clock.hard() is None
+    clock.note_step(2.0)
+    assert clock.hard() is None  # a 2 s step still ends inside the cap
+    clock.note_step(3.5)
+    assert clock.hard() == "lock-cap" and clock.step_s == 3.5
+    clock.note_step(1.0)
+    assert clock.step_s == 3.5  # the longest step is kept
+    timed = Clock(0, hard_at=time.monotonic() + 3.0)
+    timed.note_step(5.0)
+    assert timed.hard() is None  # a turn deadline keeps its own margin (unchanged from v4)

@@ -313,9 +313,19 @@ func _fail(text):
 		get_tree().quit(3)  # a test: end with an error
 
 
+# The two logs, as the README names them (%USERPROFILE% / %APPDATA%: short, and no user name on screen).
 func _log_paths():
-	var server_log = HUMAN.server_file("bot-server.log").replace("/", "\\")
-	return "Details: %s\nand %s" % [server_log, ProjectSettings.globalize_path("user://yomibench_vsbot.log").replace("/", "\\")]
+	return "Details: %s\nand %s" % [_short_path(HUMAN.server_file("bot-server.log")),
+		_short_path(ProjectSettings.globalize_path("user://yomibench_vsbot.log"))]
+
+
+static func _short_path(p):
+	p = str(p).replace("/", "\\")
+	for v in ["APPDATA", "USERPROFILE"]:  # the longer prefix first: APPDATA is inside USERPROFILE
+		var root = OS.get_environment(v).replace("/", "\\")
+		if root != "" and p.to_lower().begins_with(root.to_lower() + "\\"):
+			return "%" + v + "%" + p.substr(root.length())
+	return p
 
 
 func _last_log_line():
