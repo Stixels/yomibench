@@ -153,7 +153,7 @@ def test_a_forfeit_ends_in_a_result():
     ff = _func(human, "func _on_forfeit(who):")
     assert "_send_end(2 - who, who - 1)" in ff  # the other player wins; `forfeit` is the forfeiter's seat
     assert 'msg["forfeit"] = forfeit_seat' in _func(human, "func _send_end(")
-    assert "You forfeited: the bot wins." in human
+    assert '"Game over. You forfeited: %s wins." % bot_name("the bot")' in human
     # a new match clears the game's forfeit state, as its own rematch does
     assert "Network.forfeiter = 0" in _func(human, "func _launch(")
 
@@ -199,3 +199,27 @@ def test_the_logs_are_named_as_the_readme_names_them():
     vsbot = (MOD / "VsBot.gd").read_text()
     assert "static func _short_path(p):" in vsbot and '["APPDATA", "USERPROFILE"]' in vsbot
     assert "_short_path(HUMAN.server_file(\"bot-server.log\"))" in vsbot
+
+
+def test_the_bottom_bar_names_the_net_by_its_short_sha256():
+    """The hello's `model` (generation, short sha256, source) reaches the bottom bar on both sides: "(model 65888397)",
+    plus "from your model folder" when the app plays a newer net from the player's model folder."""
+    from types import SimpleNamespace
+
+    from yomibench.human_play import Session
+
+    human = HUMAN.read_text()
+    body = _func(human, "func model_text():")
+    assert 'server.get("model")' in body and '" (model %s" % str(m.sha)' in body
+    assert '"model folder"' in body and "from your model folder" in body
+    for head in ("func _update_status():", "func _update_host_status():"):
+        assert '[bot_name("?"), model_text()]' in _func(human, head), head
+    sha = "65888397a180e46e57ed1d615e90abf63844794318161b8c3169c7296ee65a2f"
+    trimmed = SimpleNamespace(model={"generation": 15, "sha256": "79f0" + "0" * 60, "hub_sha256": sha, "source": "bundled"})
+    assert Session.hello_model(trimmed) == {"generation": 15, "sha": "65888397", "source": "bundled"}
+    plain = SimpleNamespace(model={"generation": 16, "sha256": sha, "source": "model folder"})
+    assert Session.hello_model(plain) == {"generation": 16, "sha": "65888397", "source": "model folder"}
+    assert Session.hello_model(SimpleNamespace(model=None)) is None
+    # the result card names it too ("HustleBot g15 wins."), through bot_name() like the panel
+    assert '"%s wins." % bot_name("The bot")' in _func(human, "func _bot_wins():")
+    assert human.count("_bot_wins()") == 4 and "The bot wins." not in human
