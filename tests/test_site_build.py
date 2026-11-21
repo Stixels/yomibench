@@ -163,3 +163,15 @@ def test_a_new_spec_says_its_rating_era_started(tmp_path):
     home = read(site(tmp_path, [rel(2, 1, 0.7, 200), rel(3, 2, 0.6, 200)]), "/")
     date, old = sb.ERA_STARTS[sb.spec_hash(spec)]
     assert f"A new rating era started with spec {sb.spec_hash(spec)} on {date}" in home and old in home
+
+
+def test_submissions_are_paused(tmp_path):
+    """While the Arena is redesigned, /submit/ is only the paused note: no page links to it, the nav has no Submit
+    item, and nothing points at the submission issue form."""
+    out = site(tmp_path, [rel(2, 1, 0.7, 200), rel(3, 2, 0.6, 200)])
+    note = read(out, "/submit/")
+    assert "Submissions are paused until then." in note and "Full bot" in note and "Model alone" in note
+    for page in out.rglob("*.html"):
+        text = page.read_text(encoding="utf-8")
+        assert "issues/new" not in text and "submit-bot" not in text, page
+        assert not re.search(r'<a [^>]*href="[^"]*submit/"', text), page  # its own canonical link isn't a link to it

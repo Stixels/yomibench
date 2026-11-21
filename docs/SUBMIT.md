@@ -1,5 +1,7 @@
 # Submit a bot to the Arena
 
+> **Paused: submissions are closed while the Arena is redesigned (see the site's [Submit page](https://stixels.github.io/yomibench/submit/)).**
+
 > **Status: the checks are live, rated matches open soon.** You can submit now and the checks will tell you whether
 > your bot is ready. Valid bots are played once rated matches start, and their results then appear on the site.
 

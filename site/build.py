@@ -1,4 +1,4 @@
-"""Build the static site: the Arena (home), the Lab, Get started and Submit, every page at its own URL.
+"""Build the static site: the Arena (home), the Lab, Get started and the paused Submit note, every page at its own URL.
 
     python site/build.py --releases DIR [--docs docs] [--arena arena] [--out _site] [--site-url URL]
     python site/build.py --releases DIR --spa FILE      # one-file preview with hash routes (#lab-showcase-g13)
@@ -15,7 +15,7 @@ any base path; --site-url adds canonical links and the 404 page's base):
     /lab/showcase/          the latest generation's Showcase, and every earlier one at /lab/showcase/gN/
     /lab/generations/       the rating history by generation
     /lab/how-it-works/  /lab/training/  /lab/mod/  /lab/writeups/NAME/
-    /get-started/  /get-started/setup/  /submit/  /submit/matches/  /play/
+    /get-started/  /get-started/setup/  /submit/ (submissions paused: a short note)  /play/
 
 The one-file preview (--spa) holds every route and shows the one named by the URL's hash, the path with slashes as
 hyphens (/lab/showcase/g13/ is #lab-showcase-g13; / is #arena); the back and forward buttons work.
@@ -42,11 +42,10 @@ HERE = Path(__file__).resolve().parent
 esc = html.escape
 # Public docs and where they live on the site.
 DOC_ROUTES = {"SETUP.md": "/get-started/setup/", "TRAINING.md": "/lab/training/", "METHODOLOGY.md": "/lab/how-it-works/",
-              "PLAYING.md": "/play/", "MOD.md": "/lab/mod/", "SUBMIT.md": "/submit/"}
+              "PLAYING.md": "/play/", "MOD.md": "/lab/mod/"}
 REPO = "https://github.com/Stixels/yomibench"
-FORM = f"{REPO}/issues/new?template=submit-bot.yml"
 NAV = [("/", "Arena", "arena"), ("/lab/", "Lab", "lab"), ("/get-started/", "Get started|Start", "start"),
-       ("/submit/", "Submit", "submit"), ("/play/", "Play", "play")]
+       ("/play/", "Play", "play")]
 LAB_NAV = [("/lab/", "Overview"), ("/lab/showcase/", "Showcase"), ("/lab/generations/", "Generations"),
            ("/lab/how-it-works/", "How it works"), ("/lab/training/", "Training"), ("/lab/mod/", "The game mod")]
 FONTS = ("https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=Inter:wght@400;500;600;700"
@@ -325,7 +324,7 @@ def tile(value, name, sub="", big=False) -> str:
 
 # Prompts a visitor pastes into a coding agent (Claude Code, Codex, Cursor...). They point the agent at the repo's
 # own guides rather than restating them, so they stay right when a command changes.
-PROMPT_START = f"""Help me train a bot for yomibench and enter it in the Arena. yomibench is an open-source bot arena \
+PROMPT_START = f"""Help me train a bot for yomibench. yomibench is an open-source bot arena \
 for the game Your Only Move Is HUSTLE: {REPO}
 
 Work from the project's own guides; don't guess commands.
@@ -333,46 +332,14 @@ Work from the project's own guides; don't guess commands.
 1. Check what I need: git, Python 3.11 or newer, uv, and the game installed through Steam (the repository's \
 docs/SETUP.md says which versions and systems work). Tell me what's missing and how to install it.
 2. Clone the repository, then change into the clone as a separate command (Windows PowerShell may not run two \
-commands joined with &&). Read README.md, docs/SETUP.md, docs/TRAINING.md and docs/SUBMIT.md.
+commands joined with &&). Read README.md, docs/SETUP.md and docs/TRAINING.md.
 3. Install with `uv sync --extra train --extra test` and run the tests (`uv run pytest -q`). Tell me if anything \
 fails.
 4. Before you start training, tell me how much of my PC it will use (cores and memory) and roughly how long until \
 it promotes a first model of my own (the loop keeps going until I stop it), and wait for my go-ahead. Training runs \
 copies of the game in the background.
-5. When training has promoted a net of my own (OUT/best.json names it), help me submit it by following \
-docs/SUBMIT.md. If I started from published HustleBot weights, those weights don't count: the Arena refuses them.
 
 Explain each step in plain words. Never ask me for passwords or tokens; I'll sign in to GitHub myself."""
-
-PROMPT_SUBMIT = f"""Help me submit my yomibench bot to the Arena. Work in my clone of {REPO} (clone it if I don't \
-have one) and follow docs/SUBMIT.md exactly; don't guess commands. Run the commands below as written, with \
-`--extra net`: a fresh clone doesn't have the libraries they need.
-
-1. Find my GitHub username: the name in github.com/USERNAME. If the GitHub CLI is signed in, \
-`gh api user --jq .login` prints it. Don't use `git config user.name`; that's a display name, not the username. \
-Ask me only if you can't find it. Tell me which username you're using, and that I must open the submission form \
-signed in to GitHub as that account, or the check refuses it.
-2. Ask me for a name for my bot, like my-bot-1: 1-40 of a-z 0-9 . _ -, starting and ending with a letter or digit. \
-Before packing, check it isn't reserved or already taken (the rules are in tools/validate_submission.py; entered \
-bots are in arena/bots.json).
-3. Find my best net: the training loop names it in OUT/best.json, in its "model" field (OUT is ~/.yomibench/train \
-unless I chose another --out). It must be a net my own training promoted: if I started from published HustleBot \
-weights (--start-from), generation 1 is those weights, and the Arena refuses them. Ask me if you can't find it.
-4. Pack it: `uv run --extra net yomibench bundle pack --name BOT-NAME --owner GITHUB-USERNAME --value \
-"PATH/TO/MODEL.npz"`. Add `--policy "PATH/TO/POLICY.npz"` only if I have a policy net. This writes BOT-NAME.zip \
-in the current folder.
-5. Write entry.json, saved as UTF-8 without a BOM (Windows PowerShell adds one by default, and the check can't read \
-the file then), with: name; owner; bundle_sha256 (the sha256 of the finished zip file, lowercase, not the short \
-digest the pack command prints); candidate_set (the set my nets were trained on: the training loop's \
---candidate-set, 6 unless I changed it; it must equal candidate_set in arena/spec.json, so tell me if it doesn't); \
-"settings": {{}}; and, if I want, notes (up to 500 characters).
-6. Run `uv run --extra net python tools/validate_submission.py entry.json BOT-NAME.zip` and fix anything it \
-reports.
-7. Then give me the submission form link ({FORM}), exactly what to paste into Bot name and Entry, and which zip to \
-drag into Bundle. Remind me to read the form's two required checkboxes and tick them only if they're true. Don't \
-open the issue yourself.
-
-Explain each step in plain words. Never ask me for passwords or tokens."""
 
 
 COPY_ICON = ('<svg viewBox="0 0 24 24" aria-hidden="true"><g class="cp"><rect x="8" y="8" width="14" height="14" rx="2"/>'
@@ -708,10 +675,8 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
         note += (f" A new rating era started with spec {spec_hash(aspec)} on {era_start[0]}; earlier provisional "
                  f"results stay under the old spec {era_start[1]}.")
     body = (f'<header class="pagehead"><p class="eyebrow">Your Only Move Is HUSTLE · bot arena</p>'
-            f'<h1>The Arena</h1><p class="lead">Phase 1 is a value-net division: every entry\'s nets play inside the '
-            f'same search, ours, under one fixed set of ranked settings and the same thinking budget per move, so a '
-            f'rating measures the nets, not a whole bot. HustleBot, our own bot, is the house entry: each of its '
-            f'generations is listed as HustleBot gN.</p><p class="small">Rated games run on our private simulator of '
+            f'<h1>The Arena</h1><p class="lead">HustleBot\'s ratings so far. The Arena is being redesigned: two divisions are '
+            f'coming (model alone and full bot).</p><p class="small">Rated games run on our private simulator of '
             f'the game, checked against the real game; every video is the game replayed in the real '
             f'game.</p></header>'
             f'{hero}<section><div class="sechead"><h2>{board_title}</h2><span class="small">Bradley–Terry rating with '
@@ -721,8 +686,7 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
             f'<th>Bot</th><th class="num">Rating</th><th class="cicol"><span class="sr">Interval</span></th>'
             f'<th class="num hide-s">Games</th></tr></thead><tbody>{"".join(trs)}</tbody>'
             f'</table></div>{spec_line}</section>{by_character}'
-            f'<section class="cards three"><a class="card" href="{L("/submit/")}"><b>Submit a bot</b><span>The checks '
-            f'are live; rated matches open soon.</span></a><a class="card" href="{L("/get-started/")}">'
+            f'<section class="cards"><a class="card" href="{L("/get-started/")}">'
             f'<b>Train your own</b><span>One PC and your copy of the game.</span></a><a class="card" '
             f'href="{L("/lab/")}"><b>The Lab</b><span>How HustleBot is made, generation by generation.</span></a>'
             f'</section>')
@@ -912,14 +876,11 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
              ("Train your own on one PC", "One command runs the whole loop on one machine: self-play in headless "
               "copies of your game, training, and a promotion test. Start from scratch or from a published generation "
               "(weights are published two generations behind the current best).",
-              "/lab/training/", "Training guide", "uv run python tools/train_loop.py \\\n  --out ~/.yomibench/train"),
-             ("Submit it", "Pack your best net (named in OUT/best.json) into a bundle and enter it in the Arena. The "
-              "checks are live; rated matches open soon.", "/submit/", "How to submit",
-              "uv run yomibench bundle pack \\\n  --name my-bot-1 \\\n  --owner YOUR-GITHUB-USERNAME \\\n  --value BEST_MODEL.npz")]
-    body = ('<header class="pagehead"><p class="eyebrow">Get started</p><h1>Train a bot and enter it</h1><p class="lead">'
-            'Three steps from your copy of the game to a bot in the Arena.</p></header>'
+              "/lab/training/", "Training guide", "uv run python tools/train_loop.py \\\n  --out ~/.yomibench/train")]
+    body = ('<header class="pagehead"><p class="eyebrow">Get started</p><h1>Train a bot</h1><p class="lead">'
+            'Two steps from your copy of the game to a bot of your own.</p></header>'
             + agent_prompt("start", "Prompt to get started",
-                           "A prompt that walks you through setup, training and submitting", PROMPT_START)
+                           "A prompt that walks you through setup and training", PROMPT_START)
             + '<ol class="steps">'
             + "".join(f'<li><h2>{esc(t)}</h2><p>{esc(d)}</p><pre class="cmd" id="step-{i}">'
                       f'{copy_button(f"step-{i}", "Copy commands", one_line(c), small=True)}<code>{esc(c)}</code></pre>'
@@ -961,7 +922,7 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
         return with_copy(page, copy_key) if copy_key else page
 
     sections = {"/get-started/setup/": "start", "/lab/training/": "lab", "/lab/how-it-works/": "lab", "/play/": "play",
-                "/lab/mod/": "lab", "/submit/": "submit"}
+                "/lab/mod/": "lab"}
     for name, path in DOC_ROUTES.items():
         src = docs / name
         if not src.exists():
@@ -969,22 +930,19 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
         text = src.read_text(encoding="utf-8")
         title = (re.search(r"^#\s+(.+)$", text, re.M) or [None, name[:-3].title()])[1]
         top = ""
-        if path == "/submit/":  # the callout carries the status and the form link the doc repeats for GitHub
-            text = re.sub(r"\A(# .+\n)\n> .+?\n\n", r"\1\n", text, flags=re.S)
-            text = re.sub(r"\n\*\*\[Open the submission form\]\([^)]+\)\*\*\n", "\n", text)
-            top = (f'<div class="callout"><div><b>The checks are live; rated matches open soon.</b><span>Submit now and '
-                   f'the checks tell you whether your bot is ready. Valid bots are played once rated matches start.'
-                   f'</span></div><a class="button" href="{FORM}">Open the submission form</a></div>'
-                   '<div class="tiles">' + tile("Data only", "Phase 1", "value nets in our search, never code")
-                   + tile("Same budget", "Every bot", "fixed ranked settings")
-                   + tile("Automatic", "Checks", "size, contents, a test position") + "</div>"
-                   + agent_prompt("submit", "Prompt to submit",
-                                  "A prompt to help pack, check, and submit your trained bot", PROMPT_SUBMIT))
         if path == "/get-started/setup/":
             top = f'<nav class="crumbs"><a href="{L("/get-started/")}">← Get started</a></nav>'
         sub = subnav(path) if sections[path] == "lab" else ""
-        copy_key = {"/submit/": "submit", "/play/": "play"}.get(path, "")  # the pages people copy commands from
+        copy_key = {"/play/": "play"}.get(path, "")  # the pages people copy commands from
         routes[path] = (title, sections[path], f'{sub}{top}<article class="doc">{doc_html(text, copy_key)}</article>')
+    # Submissions are paused while the Arena is redesigned: /submit/ is only this note (docs/SUBMIT.md stays in the
+    # repository, marked paused, and isn't built), so old links land somewhere; nothing on the site links here.
+    routes["/submit/"] = ("Submissions paused", "arena",
+                          '<header class="pagehead"><p class="eyebrow">Submit</p><h1>Submissions are paused</h1>'
+                          '</header><div class="callout"><div><b>The Arena is being redesigned.</b><span>Two divisions '
+                          'are coming: Model alone (submit a model file, rated with no search) and Full bot (your own '
+                          'bot and search, run in a sealed container with the same time per move for everyone). '
+                          'Submissions are paused until then.</span></div></div>')
     for w in writeups:
         routes[f"/lab/writeups/{w.stem.lower()}/"] = (
             w.stem.replace("-", " ").title(), "lab",

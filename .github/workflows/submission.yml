@@ -3,9 +3,9 @@
 # from a submission), nets load as arrays only (allow_pickle=False) with every size bounded, and settings come from a
 # fixed list. Submissions come only through the issue form; there is no pull-request route.
 name: submission
+# Submissions are paused while the Arena is redesigned: no issue trigger (it was issues: opened, edited, labeled).
 on:
-  issues:
-    types: [opened, edited, labeled]
+  workflow_dispatch:
 permissions: {}
 concurrency:  # one check per issue at a time; an edit cancels the check of the older text
   group: submission-${{ github.event.issue.number }}
