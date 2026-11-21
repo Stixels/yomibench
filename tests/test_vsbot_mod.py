@@ -66,3 +66,33 @@ def test_a_mid_match_bot_crash_says_so_on_both_routes():
     assert "link.bot_lost(crash_text())" in human and 'to_host("bot_crashed", text)' in client
     assert '"bot_crashed"' in vsbot and "func _check_alive" in vsbot and "STALE_PLAYING_S" in vsbot
     assert '_crashed("the bot\'s copy of the game left")' in vsbot and "human.bot_crashed(text)" in vsbot
+
+
+def test_the_bottom_bar_stays_out_of_the_games_own_bottom_row():
+    """The bar sat on the game's options bar (the bottom-center "^" button's ghost and speed settings) and, on the
+    main menu, on the version and Mod List labels. It is split around the "^" button, each half clipped, and hidden
+    while our panel is up, the options bar is open or the game's HUD is hidden (F1)."""
+    human = (ROOT / "mod" / "YomiBench" / "YomiHuman.gd").read_text()
+    assert "status_r = Label.new()" in human and "clip_text = true" in human
+    assert "const STATUS_HALF_W = 302" in human  # 4 + 302 < 310 (the "^" button's left edge); 640 - 4 - 302 > 330
+    room = human.split("func _status_room():", 1)[1].split("\nfunc ", 1)[0]
+    assert '"%OptionsBar"' in room and "panel.visible" in room and "ui.visible" in room
+    upd = human.split("func _update_status():", 1)[1].split("\nfunc ", 1)[0]
+    assert upd.index("_status_room()") < upd.index("if crashed")  # also hidden after a crash, under the panel
+    # the estimate and depth go to the right half, never onto the left one
+    assert "bot's estimate" not in "".join(line for line in human.splitlines() if "s +=" in line)
+
+
+def test_the_panel_waits_for_the_bot_and_names_it_as_the_guides_do():
+    human = (ROOT / "mod" / "YomiBench" / "YomiHuman.gd").read_text()
+    # greyed until the hello (which would reset anything picked while connecting), and after a crash
+    assert human.count("_set_controls(false)") == 2 and human.count("_set_controls(true)") == 1
+    hello = human.split("func _on_hello(r):", 1)[1].split("\nfunc ", 1)[0]
+    assert hello.index("_set_controls(true)") < hello.index("settings_opt.select(")
+    assert 'return "HustleBot g" + b.substr(4)' in human
+    assert human.count('server.get("bot"') == 1  # bot_name() itself: every player-facing name goes through it
+    # the game's post-game Rematch/Quit stay hidden after the result too (phase idle, the match still on screen)
+    # (the post-game replay is a new main.game: the check is on the game on screen, not on our match's)
+    assert 'phase == "ended" or (phase == "idle" and is_instance_valid(main) and is_instance_valid(main.game))' in human
+    # nobody to chat with: the game's chat box is closed when a bot match starts (host side)
+    assert 'main.get_node_or_null("%ChatWindow")' in human
