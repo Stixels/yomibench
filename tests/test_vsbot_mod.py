@@ -223,3 +223,7 @@ def test_the_bottom_bar_names_the_net_by_its_short_sha256():
     # the result card names it too ("HustleBot g15 wins."), through bot_name() like the panel
     assert '"%s wins." % bot_name("The bot")' in _func(human, "func _bot_wins():")
     assert human.count("_bot_wins()") == 4 and "The bot wins." not in human
+    # and the HUD's name tag over P2 (the game's player list, which the bot's copy joined as "YomiBench bot")
+    body = _func(human, "func _name_the_bot():")
+    assert "Network.players[id] = bot_name(" in body and "get_network_unique_id()" in body
+    assert "_name_the_bot()" in _func(human, "func _on_hello(r):")

@@ -386,6 +386,8 @@ func _on_hello(r):
 		_say("The bot server refused: %s" % str(r.get("message")))
 		return
 	server = r
+	if side == "host":
+		_name_the_bot()
 	var was_crashed = crashed
 	crashed = false
 	if side == "client":  # the panel is the host's
@@ -439,6 +441,15 @@ func bot_name(default = "the bot"):
 		return "HustleBot g" + b.substr(4)
 	return b
 
+
+# Host: the game names the bot's seat (the HUD's tag over P2, the replay's user data) by the username the bot's copy
+# of the game joined with ("YomiBench bot", before it knew which bot it plays). Once the hello names the bot, that
+# entry of the game's player list becomes the bot's name ("HustleBot g15"), as the panel and the bottom bar say.
+func _name_the_bot():
+	var me = get_tree().get_network_unique_id() if get_tree().network_peer != null else 1
+	for id in Network.players.keys():
+		if id != me:
+			Network.players[id] = bot_name("YomiBench bot")
 
 # The bottom bar's note on the net (the hello's `model`): " (model 65888397)", its short sha256, plus "from your model
 # folder" when the app plays a newer net from the player's model folder instead of its bundled one. "" without one.
