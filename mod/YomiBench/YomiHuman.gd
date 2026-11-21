@@ -1392,18 +1392,22 @@ func _make_card(theme):
 	box.add_child(card_title)
 	var row = HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGN_CENTER
+	row.add_constant_override("separation", 10)  # three distinct buttons, not one line of text
 	box.add_child(row)
 	rematch_btn = Button.new()
 	rematch_btn.text = "Rematch"
+	rematch_btn.rect_min_size = Vector2(96, 0)
 	rematch_btn.connect("pressed", self, "_on_rematch_pressed")
 	row.add_child(rematch_btn)
 	var change = Button.new()
 	change.text = "Change settings"
+	change.rect_min_size = Vector2(96, 0)
 	change.connect("pressed", self, "_on_change_settings_pressed")
 	row.add_child(change)
 	if hosted:
 		var menu_btn = Button.new()
 		menu_btn.text = "Main menu"
+		menu_btn.rect_min_size = Vector2(96, 0)
 		menu_btn.connect("pressed", self, "_on_back_pressed")
 		row.add_child(menu_btn)
 	card_info = Label.new()

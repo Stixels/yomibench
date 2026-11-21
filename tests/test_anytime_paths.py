@@ -214,3 +214,19 @@ def test_a_search_that_ends_before_the_cap_answers_at_once():
     out = anytime.think(MatrixBot(search="oracle"), obs, 1, e, clock, deep=True)
     assert out.path == "full" and out.production is not None and time.monotonic() - t0 < 5
     assert out.stopped == "lock-in"  # the extra stages stop at the lock-in; the cap is never waited out
+
+
+def test_the_cap_stops_before_a_step_that_would_end_past_it():
+    """Production's value batches are never split (its answers stay the plain search's), so the cap stops before a
+    step as long as the longest one so far would cross it: the answer comes by the cap, not a batch later."""
+    clock = _locked_clock(10.0, locked_ago=7.0)  # 3 s left
+    assert clock.hard() is None
+    clock.note_step(2.0)
+    assert clock.hard() is None  # a 2 s step still ends inside the cap
+    clock.note_step(3.5)
+    assert clock.hard() == "lock-cap" and clock.step_s == 3.5
+    clock.note_step(1.0)
+    assert clock.step_s == 3.5  # the longest step is kept
+    timed = Clock(0, hard_at=time.monotonic() + 3.0)
+    timed.note_step(5.0)
+    assert timed.hard() is None  # a turn deadline keeps its own margin (unchanged from v4)
