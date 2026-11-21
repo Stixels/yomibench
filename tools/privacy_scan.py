@@ -54,6 +54,10 @@ ALLOW_LINES = [
 ]
 BAD_EXT = {".pck", ".tscn", ".tres", ".import", ".ogg", ".wav", ".mp3", ".exe", ".dll", ".so", ".dylib",
            ".x86_64", ".npz", ".gz", ".jsonl", ".tar", ".zip", ".whl", ".bundle", ".pyc", ".replay"}
+# Data files the site reads, allowed despite their extension: the Arena's rated results (fleet/arena_run.py collect).
+# They are still scanned as text, and a row naming a host or machine is refused.
+DATA_OK = re.compile(r"arena/results/[\w.-]+\.jsonl")
+HOST_KEY = re.compile(r'"host(?:name)?"\s*:', re.IGNORECASE)
 SKIP_TEXT = (".lock",)
 MAX_BYTES = 5 * 1024 * 1024
 
@@ -94,7 +98,7 @@ def scan_repo(repo: Path, rs) -> list[dict]:
         f = repo / rel
         if not f.is_file():
             continue
-        if f.suffix.lower() in BAD_EXT:
+        if f.suffix.lower() in BAD_EXT and not DATA_OK.fullmatch(rel):
             hits.append({"path": rel, "line": 0, "why": "asset, data or binary file", "text": ""})
         if f.stat().st_size > MAX_BYTES:
             hits.append({"path": rel, "line": 0, "why": "file over 5 MB", "text": ""})
@@ -105,6 +109,9 @@ def scan_repo(repo: Path, rs) -> list[dict]:
         except UnicodeDecodeError:
             continue
         hits += scan_text(rs, rel, text)
+        if DATA_OK.fullmatch(rel):
+            hits += [{"path": rel, "line": n, "why": "host or machine name in a results row", "text": line[:160]}
+                     for n, line in enumerate(text.splitlines(), 1) if HOST_KEY.search(line)]
     return hits
 
 
