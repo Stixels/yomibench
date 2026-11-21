@@ -455,3 +455,37 @@ def test_pairs_by_pairing_flag_errors(tmp_path):
                   ['--pairs-by-pairing', 'Cowboy:Cowboy=60,Cowboy:Ninja=60,Ninja:Cowboy=60,Ninja:Ninja=0']):
         with pytest.raises(SystemExit):
             pool.main(base + extra)
+
+
+def test_play_with_a_batch_engine_builds_it_from_the_plugin_per_opponent(monkeypatch, tmp_path):
+    """A batch:N spec (the Arena's) plays through the batch plugin's engine factory: the plugin import must not
+    clobber _play's own engine table (it once did, and every batch game crashed with a TypeError)."""
+    from types import SimpleNamespace
+
+    from yomibench import plugins
+
+    built, served = [], []
+
+    class Engine:
+        def hello(self):
+            return {'engine': 'fake-batch'}
+
+    def batch_arena_engines(bots, candidate_set, match_settings):
+        built.append([b.name for b in bots])
+        return lambda spec: served.append(spec) or Engine()
+
+    monkeypatch.setattr(plugins, 'batch', lambda: SimpleNamespace(batch_arena_engines=batch_arena_engines))
+    monkeypatch.setattr(pool, 'make_bot', lambda spec: SimpleNamespace(name=spec))
+
+    def fake_round_robin(connects, bots, characters, pairs, seed, results, **kw):
+        for c in connects:
+            c()
+        return []
+    monkeypatch.setattr(pool, 'run_round_robin', fake_round_robin)
+    args = SimpleNamespace(candidate='cand', candidate_set=6, match_settings=None, pairs_by_pairing=None, cowboy=None,
+                           pairs=1, seed=1, max_turns=30, record_dir=None)
+    hellos = []
+    pool._play(args, [('previous-best', 'p'), ('ckpt1', 'a')], ['batch:4'], ['Ninja'], None, tmp_path / 'r.jsonl',
+               hellos)
+    assert built == [['candidate', 'previous-best'], ['candidate', 'ckpt1']]
+    assert served == ['batch:4', 'batch:4'] and hellos == [{'engine': 'fake-batch'}]

@@ -468,7 +468,8 @@ def _play(args, pool, specs, characters, shard, results_path, hellos):
         opponent = make_bot(spec)
         opponent.name = label
         if any(s.split(':', 1)[0] == 'batch' for s in specs):
-            from yomibench.plugins import batch; batch_arena_engines = batch().batch_arena_engines
+            from yomibench.plugins import batch as batch_plugin  # not `batch`: that's the dict above
+            batch_arena_engines = batch_plugin().batch_arena_engines
 
             batch['make'] = batch_arena_engines([candidate, opponent], args.candidate_set, args.match_settings)
         by_pairing = {'pairs_by_pairing': _by_pairing(args.pairs_by_pairing)} if args.pairs_by_pairing else {}
