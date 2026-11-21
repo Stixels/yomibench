@@ -19,7 +19,7 @@
  "mod_md5": "d358bc593c85d7f60b8baf74d6933801",
  "harness": {
   "version": "0.1.0",
-  "code_sha256": "593117a3e2eff5d5e17f1b3922dcb53da08dc8313d151c1137b60a9e68e81585"
+  "code_sha256": "39f10c43c260483535d62dcc3d275e47b632bb38c06ba8c2c847a4b12d2a7673"
  },
  "candidate_set": 6,
  "set5": "all",

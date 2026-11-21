@@ -159,7 +159,8 @@ def results(rels: list[dict], rows: list[dict] = ()) -> list[tuple[str, str, flo
 WEIGHTS_LAG = 2  # HustleBot's weights are published this many generations behind the current best
 ARENA_ONLY_GAMES = 100  # per bot, in the current spec's era, before the Arena rates on its own games alone
 # When each Arena spec's rating era started, and the spec it replaced: {spec hash: (date, previous spec hash)}.
-ERA_STARTS = {"ea7c0f29f0cf": ("Nov 20, 2026", "f6910abccc01")}  # b33e39c692b8 (Nov 20) played no rated games
+# b33e39c692b8 and ea7c0f29f0cf (both Nov 20) played no rated games, so the era after f6910abccc01 starts here.
+ERA_STARTS = {"d9feb02ae9da": ("Nov 20, 2026", "f6910abccc01")}
 PRIOR_GAMES = 2  # each player also drew this many games against a fixed reference: keeps a perfect score finite
 
 
