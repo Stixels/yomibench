@@ -40,7 +40,12 @@ THAT the human locked in, with a one-way `{"type": "locked_in", "turn": N}` (no 
 The after-lock cap (no turn timer, since private build v5; `lock_cap`, default 10 s): once the human locks in, the
 bot has at most `lock_cap` seconds more. A search that finishes sooner answers at once; one the cap cuts plays its
 best so far (`partial-full`). The mod sends `locked_in` in every untimed match for this, whatever the option says.
-Timed decisions keep their turn deadline only.
+Timed decisions keep their turn deadline only, except on a chess clock (ranked, since g15's build): there the bot
+spends its bank about as the human spends theirs. While its bank has room above the reserve (`bank_reserve`, 60 s)
+it thinks until the human locks in, then at most `lock_cap` more (or less if its searches end), never past (bank
+left - reserve); with less room it plays on the floor, the per-turn deadline above (anytime.bank_budget). The bank
+is the game's own P2 clock as the mod reads it at the turn's open (`bot_clock_s` in the decision), else the bot's
+model of it. Each decision logs `bank_left_s`, `budget_s` and `mode` (bank | floor) in its `clock`.
 
 A forfeit (the game's pause menu): the mod's `end` carries `forfeit: 0` (P1, the human, forfeited) and the winner;
 the game is recorded as finished (`reason` "forfeit"), the sim's position as it was (its match never ended).
@@ -119,7 +124,8 @@ SETTINGS_PRESETS: dict[str, dict[str, Any]] = {
 TIMER_KEYS = anytime.TIMER_KEYS
 # What a decision message may carry. Moves are simultaneous: the human's input for this turn only
 # ever arrives with the next decision (`inputs`, last turn's), after the bot has answered.
-DECISION_KEYS = frozenset({"type", "turn", "inputs", "snapshot", "p2_fallback"})
+# bot_clock_s: the bot's own clock (the game's P2 turn timer) as the turn opened; never anything of the human's.
+DECISION_KEYS = frozenset({"type", "turn", "inputs", "snapshot", "p2_fallback", "bot_clock_s"})
 # One-way messages (no reply, so the mod's reply order is untouched): the human locked in this
 # turn's move, or the turn timer is about to run out. They carry only `type` and `turn` — never
 # what the human picked — and anything more is refused whole (think until lock-in: yomibench.anytime).
@@ -428,6 +434,7 @@ class Session:
                  model: dict[str, Any] | None = None, pick: str = "mixed", show_estimate: bool = False,
                  settings: str = "standard", think_until_lockin: bool = True, turn_timer: bool | None = None,
                  think_cap: float = anytime.THINK_CAP_S, lock_cap: float = anytime.LOCK_CAP_S,
+                 bank_reserve: float = anytime.BANK_RESERVE_S,
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
                  deadline_fraction: float = anytime.DEADLINE_FRACTION, log: Callable[[str], None] = print,
                  engine_spec: str | None = None):
@@ -444,6 +451,9 @@ class Session:
         if not lock_cap > 0:
             raise ValueError(f"the after-lock cap must be > 0 s: {lock_cap}")
         self.lock_cap = float(lock_cap)
+        if not bank_reserve >= 0:
+            raise ValueError(f"the bank reserve must be >= 0 s: {bank_reserve}")
+        self.bank_reserve = float(bank_reserve)
         self.bot = make_bot(bot_spec)
         if getattr(self.bot, "playout_cap", None):  # human play always searches full turns
             raise ValueError(f"{bot_spec}: human play searches every turn in full; drop the @cheap option")
@@ -704,12 +714,33 @@ class Session:
         turn = int(msg.get("turn", g.turns))
         clock = clock or anytime.Clock(turn)
         bank = g.timer.available() if g.timer is not None else None  # the game's clock runs every turn
-        # The time this answer has: one turn of the match's turn timer, or less if a bank has less left.
-        available = min((t for t in (bank, g.turn_s) if t is not None), default=None)
-        if available is not None and clock.hard_at is None:
-            within = anytime.answer_within(available, self.deadline_margin, self.deadline_fraction)
-            clock.hard_at = clock.t0 + within
-            clock.emergency_at = clock.t0 + anytime.emergency_within(available, within)
+        reported = msg.get("bot_clock_s")
+        if bank is not None and g.timer.mode != "default" and isinstance(reported, (int, float))                 and not isinstance(reported, bool) and reported >= 0:
+            # The game's own P2 clock wins over the model (it also counts what the transport took); a chess turn
+            # that opens under the floor is topped up to it.
+            bank = float(reported)
+            if g.timer.mode == "chess":
+                bank = max(bank, g.timer.turn_min)
+            g.timer.bank = bank
+        plan = budget = None
+        if bank is not None and g.timer.mode == "chess" and g.turn_s is not None:
+            plan, budget = anytime.bank_budget(bank, g.turn_s, self.bank_reserve, self.deadline_margin,
+                                               self.deadline_fraction)
+        if plan == "bank" and clock.hard_at is None:
+            # The bank's room: think while the human does, then the after-lock cap; never past the reserve.
+            available = budget
+            clock.hard_at = clock.t0 + budget
+            clock.emergency_at = clock.t0 + anytime.emergency_within(budget, budget)
+            clock.lock_cap = self.lock_cap
+            clock.cap_at = clock.t0 + budget
+        else:
+            # The time this answer has: one turn of the match's turn timer, or less if a bank has less left.
+            available = min((t for t in (bank, g.turn_s) if t is not None), default=None)
+            if available is not None and clock.hard_at is None:
+                within = anytime.answer_within(available, self.deadline_margin, self.deadline_fraction)
+                clock.hard_at = clock.t0 + within
+                clock.emergency_at = clock.t0 + anytime.emergency_within(available, within)
+                budget = within if plan == "floor" else budget
         if clock.cap_at is None:  # thinking until lock-in never runs past this, timer or not
             clock.cap_at = clock.t0 + self.think_cap
         if available is None:  # no turn timer: at most lock_cap seconds after the human locks in
@@ -726,7 +757,9 @@ class Session:
                 bot["clock"] = {"available_s": None if available is None else round(available, 3),
                                 "think_s": round(took, 3),
                                 "left_s": None if available is None else round(available - took, 3),
-                                "bank_s": None if g.timer is None else round(g.timer.bank, 3)}
+                                "bank_s": None if g.timer is None else round(g.timer.bank, 3),
+                                "bank_left_s": None if plan is None else round(bank, 3),
+                                "budget_s": None if budget is None else round(budget, 3), "mode": plan}
 
     def _decide(self, g: Game, msg: dict[str, Any], turn: int, clock: anytime.Clock,
                 available: float | None) -> dict[str, Any]:
@@ -823,7 +856,7 @@ class Session:
         played = {"partial-full": "the full search's best so far", "quick": "the emergency quick search"}
         if available is None and clock.soft_at is not None:
             g.untimed_locked += 1
-        if out.production is None and available is None and out.stopped in ("lock-cap", "emergency"):
+        if out.production is None and clock.lock_cap is not None and out.stopped in ("lock-cap", "emergency"):
             g.lock_cap_hits += 1
             notes["lock_cut"] = True
             self.log(f"game {g.id}: turn {obs.turn}: the {clock.lock_cap:g} s after-lock cap cut the full search; "
@@ -1164,6 +1197,9 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--lock-cap", type=float, default=anytime.LOCK_CAP_S, metavar="SECONDS",
                     help="no turn timer: once you lock in, the bot answers within this many seconds (its best so far "
                          f"if its search hasn't finished; default {anytime.LOCK_CAP_S:g}; timed turns keep their deadline)")
+    ap.add_argument("--bank-reserve", type=float, default=anytime.BANK_RESERVE_S, metavar="SECONDS",
+                    help="ranked (a chess clock): the bot never plans its bank below this; with no more room it plays "
+                         f"on the 15 s floor (default {anytime.BANK_RESERVE_S:g})")
     ap.add_argument("--engine", default=None, metavar="sim|game-pool:N|game-pool:auto",
                     help="the bot's engine: a simulator plugin (sim) or N headless copies of your own game (game-pool, sized to "
                          "this PC with auto). Default: sim when it is installed, else game-pool:auto")

@@ -95,6 +95,10 @@ EMERGENCY_FRACTION = 0.15
 THINK_CAP_S = 60.0
 # No turn timer: once the human locks in, the bot has at most this much longer to answer (human_play --lock-cap).
 LOCK_CAP_S = 10.0
+# A chess clock (ranked: a 15-minute bank, a 15 s floor per turn): the bot spends its bank about as the human spends
+# theirs, but never plans a decision past (bank left - BANK_RESERVE_S) (human_play --bank-reserve). With no more room
+# than the floor's own stop it plays on the floor, the per-turn deadline every timed turn has (bank_budget).
+BANK_RESERVE_S = 60.0
 PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed answer (human play logs it per turn)
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
 # The match settings that are the game's turn clock, not the simulation (ui/UILayer.gd and main.gd
@@ -130,9 +134,10 @@ class Clock:
         self.emergency_at = emergency_at
         # Thinking until lock-in: when its extra stages stop even without a lock-in (a soft stop: THINK_CAP_S).
         self.cap_at: float | None = None
-        # No turn timer: the after-lock cap (LOCK_CAP_S). Once the human locks in, a hard stop `lock_cap` seconds
-        # later ("lock-cap"), with an emergency point before it. Read lazily from `soft_at`, so a lock-in that
-        # arrives before the decision set this still counts. Ignored while `hard_at` (a turn deadline) is set.
+        # The after-lock cap (LOCK_CAP_S): no turn timer, or a chess clock's bank turn (beside its `hard_at`, the
+        # budget's end). Once the human locks in, a hard stop `lock_cap` seconds later ("lock-cap"), with an
+        # emergency point before it. Read lazily from `soft_at`, so a lock-in that arrives before the decision set
+        # this still counts. Unset (None) on a floor or per-turn timed decision: its deadline only.
         self.lock_cap: float | None = None
         self.t0 = time.monotonic()
         self._soft, self._hard = threading.Event(), threading.Event()
@@ -178,20 +183,20 @@ class Clock:
 
     def lock_hard_at(self) -> float | None:
         """The after-lock cap's hard stop (monotonic), once the human has locked in; None without one."""
-        if self.lock_cap is None or self.hard_at is not None or self.soft_at is None:
+        if self.lock_cap is None or self.soft_at is None:
             return None
         return self.soft_at + self.lock_cap
 
     def emergency(self) -> float | None:
         """When a production search that has solved nothing yet gives way to the quick search: the turn
         deadline's emergency point, else the after-lock cap's (its LOCK_CAP_S less the emergency margin)."""
-        if self.emergency_at is not None:
-            return self.emergency_at
         at = self.lock_hard_at()
-        if at is None:
-            return None
-        assert self.lock_cap is not None
-        return at - self.lock_cap + emergency_within(self.lock_cap, self.lock_cap)
+        lock = None
+        if at is not None:
+            assert self.lock_cap is not None
+            lock = at - self.lock_cap + emergency_within(self.lock_cap, self.lock_cap)
+        both = [t for t in (self.emergency_at, lock) if t is not None]
+        return min(both) if both else None
 
     def soft(self) -> str | None:
         why = self.hard() or (self._soft_why if self._soft.is_set() else None)
@@ -240,6 +245,23 @@ def emergency_within(available: float, answer_s: float) -> float:
     max(EMERGENCY_MARGIN_S, EMERGENCY_FRACTION x `available`), but never before half of `answer_s` (the full
     search always gets most of a short turn)."""
     return max(answer_s / 2, answer_s - max(EMERGENCY_MARGIN_S, EMERGENCY_FRACTION * available))
+
+
+def bank_budget(bank_left: float, turn_s: float, reserve_s: float = BANK_RESERVE_S,
+                margin_s: float = DEADLINE_MARGIN_S, fraction: float = DEADLINE_FRACTION) -> tuple[str, float]:
+    """A chess-clock decision's plan, as (mode, budget_s), with `bank_left` seconds on the bot's clock (after the
+    turn's top-up to the floor) and `turn_s` the floor (ranked: 15 s):
+
+    - "bank": the room above the reserve, `bank_left - reserve_s`, when that is more than the floor's own stop.
+      The bot thinks while the human does and answers once the human has locked in (plus at most the after-lock
+      cap), when its searches end, or at the budget's end, whichever is first; never past the reserve.
+    - "floor": otherwise the per-turn stop every timed turn has, answer_within(min(bank_left, turn_s)): a ranked
+      turn is answered by 12.75 s, inside the 15 s the game tops a low bank up to."""
+    floor = answer_within(min(bank_left, turn_s), margin_s, fraction)
+    room = bank_left - reserve_s
+    if room > floor:
+        return "bank", room
+    return "floor", floor
 
 
 def _num(v: Any) -> float | None:

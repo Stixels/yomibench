@@ -178,12 +178,13 @@ def test_the_cap_counts_from_the_lock_in_even_if_it_arrived_before_the_cap_was_s
     assert anytime.LOCK_CAP_S == 10.0
 
 
-def test_a_turn_deadline_wins_over_the_cap():
+def test_a_timed_turn_has_only_its_deadline():
+    """A per-turn timed decision (and a ranked floor turn) sets no after-lock cap: only its deadline stops it. (A
+    ranked bank turn sets both on purpose: test_bank_budget.)"""
     clock = Clock(0, hard_at=time.monotonic() + 100)
-    clock.lock_cap = 0.01
     clock.signal("locked_in")
     time.sleep(0.02)
-    assert clock.lock_hard_at() is None and clock.hard() is None  # timed: only the deadline
+    assert clock.lock_cap is None and clock.lock_hard_at() is None and clock.hard() is None
 
 
 def test_the_cap_cuts_the_full_search_and_plays_its_best_so_far(quick_calls):

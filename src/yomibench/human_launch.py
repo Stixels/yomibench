@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Callable, ContextManager
 
-from yomibench.anytime import LOCK_CAP_S, THINK_CAP_S
+from yomibench.anytime import BANK_RESERVE_S, LOCK_CAP_S, THINK_CAP_S
 from yomibench.game import EXE, PACK, build_run_dir
 from yomibench.human_play import Server, Session, worker_paused
 
@@ -158,6 +158,7 @@ def session_kwargs(args, bot) -> dict:
                 settings=args.settings, think_until_lockin=args.think_until_lockin,
                 think_cap=getattr(args, "think_cap", THINK_CAP_S),
                 lock_cap=getattr(args, "lock_cap", LOCK_CAP_S),
+                bank_reserve=getattr(args, "bank_reserve", BANK_RESERVE_S),
                 turn_timer=turn_timer_arg(args),
                 deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
                 engine_spec=getattr(args, "engine", None))
