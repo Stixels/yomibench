@@ -108,7 +108,11 @@ func on_mp_to_bot(sender, kind, payload):
 			human._abort(str(payload))
 
 
-func bot_lost():
+# The bot server went away mid-session (a crash): the host shows `text`, then this copy quits (after a moment, so
+# the message leaves first).
+func bot_lost(text = ""):
+	to_host("bot_crashed", text)
+	yield(get_tree().create_timer(3.0), "timeout")
 	_quit("lost the bot server")
 
 

@@ -1,21 +1,34 @@
 """Anytime search for human play: answer before the game's turn timer, and (opt-in) think until
 the human locks in.
 
-**The turn deadline** (every search mode, every match): a decision has one turn of the match's
-turn timer (`turn_seconds`; with no timer running, the match's `turn_time`), or less if
-`GameTimer`, which follows the game's own clock for the bot's seat (ui/UILayer.gd: per-turn,
-chess bank or increment), has less left, and must be answered `margin` before that runs out:
-max(DEADLINE_MARGIN_S, DEADLINE_FRACTION x that time). First a `quick` answer is computed, production's quick
-turn (`cap_candidates` 32 per seat, options-shuffle, no refinement: about a tenth of a full search),
-as the guaranteed fallback; then the production search. If the deadline cuts the production
-search, the quick answer is played; if it cuts even that, P2 holds (Continue). When the
-deadline doesn't hit, the answer is exactly the plain search's.
+**No turn timer** (timer off, or the standard settings): there is no deadline. The production search
+always finishes, and nothing here cuts it (`turn_seconds` is None without a running timer).
 
-**Think until I lock in** (opt-in): the bot answers a decision with the deepest search it finished before it had to stop. Stages run
+**The turn deadline** (a turn timer is running, e.g. ranked with "Turn timer" ticked): a decision has
+one turn of the match's turn timer (`turn_seconds`), or less if `GameTimer`, which follows the game's
+own clock for the bot's seat (ui/UILayer.gd: per-turn, chess bank or increment), has less left, and
+must be answered `margin` before that runs out: max(DEADLINE_MARGIN_S, DEADLINE_FRACTION x that time).
+The budget goes to the production search first. Every double-oracle round it solves is kept as its
+best-so-far mix (`MatrixBot.progress`), so the answer is, by preference:
+
+- `full`: the production search finished (or a deeper stage after it).
+- `partial-full`: the deadline cut the production search; its latest round's mix is played.
+- `quick`: the emergency only. If the production search has solved no round by the emergency point
+  (`Clock.emergency_at`: max(EMERGENCY_MARGIN_S, EMERGENCY_FRACTION x the time) before the deadline, but
+  never in the first half of the time to the deadline), it
+  stops, and production's quick turn (`cap_candidates` 32 per seat, options-shuffle, no refinement) gets
+  the rest of the time.
+- `continue`: not even the quick search finished by the deadline; P2 holds (Continue).
+
+When the deadline doesn't hit, the answer is exactly the plain search's.
+
+**Think until I lock in** (on by default since private build v4: the bot uses the human's thinking time): the
+bot answers a decision with the deepest search it finished before it had to stop, at the latest THINK_CAP_S
+after the decision opened (configurable; a cap on the extra stages only, so an untimed game never waits on
+the bot indefinitely; the production search always finishes first). Stages run
 in order; each one's answer replaces the stored one only when it completes and is certified
 (converged), so a stop mid-stage keeps the last finished answer:
 
-0. `quick` (only with a turn timer): the fallback above, in a private turn cache.
 1. `production`: the bot's own search, exactly as human play runs it without this option (the
    same bot, settings and candidate view). Only a hard stop (the turn timer's, or the decision
    being superseded) can cut it short; a lock-in never does, so the answer is never weaker than
@@ -65,6 +78,15 @@ VALUE_CHUNK = 256    # states per value-net batch in stages 2-4
 # --deadline-fraction).
 DEADLINE_MARGIN_S = 2.0
 DEADLINE_FRACTION = 0.15
+# With a turn timer and no production round solved this long before the deadline, the emergency quick search
+# gets the rest: max(EMERGENCY_MARGIN_S, EMERGENCY_FRACTION x the decision's time). A ranked 15 s turn: by
+# 10.5 s the production search must have solved one round, or the quick search runs until 12.75 s.
+EMERGENCY_MARGIN_S = 1.5
+EMERGENCY_FRACTION = 0.15
+# Thinking until lock-in stops its extra stages this long after the decision opened even if the human hasn't locked
+# in (human_play --think-cap). A soft stop: the production search before them always finishes.
+THINK_CAP_S = 60.0
+PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed answer (human play logs it per turn)
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
 # The match settings that are the game's turn clock, not the simulation (ui/UILayer.gd and main.gd
 # read them; game.gd never does): kept for the deadline, never sent to the sim.
@@ -73,7 +95,7 @@ TIMER_KEYS = ("timer_mode", "turn_time", "turn_min_length", "increment_starting_
 
 
 class Stopped(Exception):
-    """A stop check fired; `why` is "lock-in", "deadline" or "superseded"."""
+    """A stop check fired; `why` is "lock-in", "deadline", "superseded" or "emergency"."""
 
     def __init__(self, why: str):
         super().__init__(why)
@@ -93,8 +115,12 @@ class Clock:
     reader thread signals, the search thread checks."""
 
     def __init__(self, turn: int | None = None, hard_at: float | None = None,
-                 superseded: Callable[[], bool] | None = None):
+                 superseded: Callable[[], bool] | None = None, emergency_at: float | None = None):
         self.turn, self.hard_at, self.superseded = turn, hard_at, superseded
+        # With a turn timer: when a production search that has solved nothing yet gives way to the quick search.
+        self.emergency_at = emergency_at
+        # Thinking until lock-in: when its extra stages stop even without a lock-in (a soft stop: THINK_CAP_S).
+        self.cap_at: float | None = None
         self.t0 = time.monotonic()
         self._soft, self._hard = threading.Event(), threading.Event()
         self._soft_why = self._hard_why = ""
@@ -127,7 +153,10 @@ class Clock:
         return None
 
     def soft(self) -> str | None:
-        return self.hard() or (self._soft_why if self._soft.is_set() else None)
+        why = self.hard() or (self._soft_why if self._soft.is_set() else None)
+        if why is None and self.cap_at is not None and time.monotonic() >= self.cap_at:
+            why = "think-cap"
+        return why
 
     def check_hard(self) -> None:
         why = self.hard()
@@ -141,13 +170,15 @@ class Clock:
 
 
 def turn_seconds(timer_settings: dict[str, Any]) -> float | None:
-    """The seconds one turn has on the match's turn timer, which every answer must beat (user
-    decision: the bot always answers before the game's turn timer, in every mode):
+    """The seconds one turn has on the match's turn timer, which every answer must beat:
     `chess` its per-turn minimum `turn_min_length` (ranked: 15 s), `increment` its
-    `increment_per_turn`, and otherwise `turn_time` seconds (`default`, and with no timer running,
-    e.g. singleplayer's `timer_mode` none, the match's `turn_time`: the standard lobby's 30 s).
-    None only when the settings name no positive per-turn time at all."""
+    `increment_per_turn`, and otherwise (`default`) `turn_time` seconds. None when no timer runs
+    (`timer_mode` "none" or absent: the "Turn timer" box unticked, or the standard settings), so an
+    untimed decision has no deadline and its full search always finishes; also None when the
+    settings name no positive per-turn time at all."""
     mode = timer_settings.get("timer_mode")
+    if not isinstance(mode, str) or mode == "none":
+        return None
     key = {"chess": "turn_min_length", "increment": "increment_per_turn"}.get(mode, "turn_time")
     v = _num(timer_settings.get(key))
     if (v is None or v <= 0) and key != "turn_time":
@@ -160,6 +191,14 @@ def answer_within(available: float, margin_s: float = DEADLINE_MARGIN_S,
     """How long a decision with `available` seconds on the clock may take: the time less
     max(margin_s, fraction x the time), never below 0."""
     return max(0.0, available - max(margin_s, fraction * available))
+
+
+def emergency_within(available: float, answer_s: float) -> float:
+    """When (seconds into a decision that must be answered by `answer_s`, with `available` on the clock) a
+    production search that has solved nothing yet gives way to the quick search: `answer_s` less
+    max(EMERGENCY_MARGIN_S, EMERGENCY_FRACTION x `available`), but never before half of `answer_s` (the full
+    search always gets most of a short turn)."""
+    return max(answer_s / 2, answer_s - max(EMERGENCY_MARGIN_S, EMERGENCY_FRACTION * available))
 
 
 def _num(v: Any) -> float | None:
@@ -331,7 +370,7 @@ class Answer:
         return (self.row, self.value) if seat == 0 else (self.col, -self.value)
 
     def label(self) -> str:
-        return {"quick": "quick search", "production": "full search",
+        return {"quick": "quick search", "production": "full search", "partial-full": "full search, best so far",
                 "widen": "widened"}.get(self.name, f"2-decision x{self.pairs}")
 
 
@@ -357,25 +396,29 @@ class Deepener:
         self.leaf: dict[tuple[Any, int, int], float] = {}  # (view, i, j) -> evaluator value (p1's)
         self.unbranchable: set[tuple[int, int]] = set()
         self.child_previews = 0
+        # The production search's best-so-far: its latest solved double-oracle round (MatrixBot.progress).
+        self.partial: Answer | None = None
+        self.partial_rounds = 0
         # A bot's search key holds id(value): keep every stage's evaluator alive for the decision,
         # so no later stage's evaluator can reuse an id and meet an earlier stage's cached search.
         self.keep: list[Any] = []
 
-    def stages(self, quick: bool = False, deep: bool = True) -> list[Stage]:
-        """`quick`: the quick fallback first (a turn timer is on); `deep`: the extra stages after
-        production (think until lock-in). The quick and production stages stop only on a hard stop."""
-        out: list[Stage] = [(0, lambda _b: self.quick(), False)] if quick else []
-        out.append((1, lambda _b: self.production(), False))
+    def stages(self, deep: bool = True) -> list[Stage]:
+        """The production search, then with `deep` the extra stages (think until lock-in). The production
+        stage stops only on a hard stop, or (a turn timer) at the emergency point while it has solved
+        nothing (see `think`)."""
+        out: list[Stage] = [(1, lambda _b: self.production(), False)]
         if deep:
             out.append((2, self.widen, True))
             for stage, k, rounds in self.TWO_DECISION:
                 out.append((stage, (lambda best, s=stage, k=k, r=rounds: self.two_decision(best, s, k, r)), True))
         return out
 
-    # --- stage 0: the quick fallback ---------------------------------------------------------
+    # --- stage 0: the emergency quick search -----------------------------------------------------
 
     def quick(self) -> Answer:
-        """Production's quick turn: each seat's candidates capped at QUICK_CAP (QUICK_POLICY),
+        """The emergency answer (a turn timer, and the production search solved nothing by the emergency
+        point): production's quick turn: each seat's candidates capped at QUICK_CAP (QUICK_POLICY),
         no factor refinement, searched in a private turn cache so nothing of it reaches the
         production search's lists or previews."""
         check = self.clock.check_hard
@@ -398,8 +441,9 @@ class Deepener:
     # --- stages 1 and 2: the matrix bot's own search -----------------------------------------
 
     def _search(self, bot: MatrixBot, stage: int, name: str, check: Callable[[], None],
-                chunk: int | None) -> Answer:
+                chunk: int | None, progress: Callable[..., None] | None = None) -> Answer:
         b = copy.copy(bot)
+        b.progress = progress
         b.value = GuardedValue(bot.value, check, chunk, self.clock.work)
         self.keep.append(b.value)
         eng = Guarded(self.engine, check, work=self.clock.work)
@@ -410,7 +454,18 @@ class Deepener:
         return Answer(stage, name, lists, row, col, value, view=key, info=info)
 
     def production(self) -> Answer:
-        return self._search(self.bot, 1, "production", self.clock.check_hard, None)
+        def check() -> None:
+            self.clock.check_hard()
+            at = self.clock.emergency_at
+            if at is not None and self.partial is None and time.monotonic() >= at:
+                raise Stopped("emergency")
+
+        def progress(row: list[float], col: list[float], value: float, lists: list[list[Candidate]],
+                     converged: bool) -> None:
+            self.partial = Answer(1, "partial-full", lists, row, col, value, info={"converged": converged})
+            self.partial_rounds += 1
+
+        return self._search(self.bot, 1, "production", check, None, progress)
 
     def widen(self, _best: Answer | None) -> Answer | None:
         if self.bot.mode != "oracle":
@@ -508,10 +563,11 @@ Stage = tuple[int, Callable[[Answer | None], "Answer | None"], bool]  # (number,
 
 @dataclass
 class Outcome:
-    best: Answer | None              # the deepest finished answer (None: the hard stop cut everything)
-    stopped: str                     # "lock-in", "deadline", "superseded" or "done"
+    best: Answer | None              # the answer to play (None: nothing finished: P2 holds with Continue)
+    stopped: str                     # "lock-in", "deadline", "superseded", "emergency", "think-cap" or "done"
     trace: list[dict[str, Any]]      # per stage tried: stage, name, ms, and how it ended
     production: Answer | None        # the production search's answer, if it finished
+    path: str = "full"               # one of PATHS: what produced `best`
 
 
 def run(stages: list[Stage], clock: Clock) -> Outcome:
@@ -550,8 +606,25 @@ def run(stages: list[Stage], clock: Clock) -> Outcome:
     return Outcome(best, stopped, trace, production)
 
 
-def think(bot: MatrixBot, obs: Observation, seat: int, engine: Engine, clock: Clock, *, deep: bool = True,
-          quick: bool = False) -> Outcome:
-    """`bot`'s answer for `seat`: production's search (after the quick fallback with `quick`),
-    then, with `deep`, deeper stages until the clock stops it or every stage is done."""
-    return run(Deepener(bot, obs, seat, engine, clock).stages(quick=quick, deep=deep), clock)
+def think(bot: MatrixBot, obs: Observation, seat: int, engine: Engine, clock: Clock, *, deep: bool = True) -> Outcome:
+    """`bot`'s answer for `seat`: production's search, then, with `deep`, deeper stages until the clock
+    stops it or every stage is done. If a hard stop cuts the production search (a turn timer's deadline),
+    its best-so-far round is played (`partial-full`). With nothing solved by the clock's `emergency_at`, the
+    quick search gets the time left until the deadline (`quick`); if even that is cut, nothing (`continue`)."""
+    d = Deepener(bot, obs, seat, engine, clock)
+    out = run(d.stages(deep=deep), clock)
+    if out.best is not None:
+        return out  # full: the production search finished (and maybe deeper stages after it)
+    if d.partial is not None:
+        d.partial.info["rounds_seen"] = d.partial_rounds
+        out.best, out.path = d.partial, "partial-full"
+        return out
+    if out.stopped != "emergency":  # cut (deadline, superseded) before the emergency point: nothing to play
+        out.path = "continue"
+        return out
+    q = run([(0, lambda _b: d.quick(), False)], clock)
+    out.trace += q.trace
+    out.best, out.path = q.best, ("quick" if q.best is not None else "continue")
+    if q.best is None:
+        out.stopped = q.stopped
+    return out

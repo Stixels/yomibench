@@ -33,6 +33,7 @@ const NO_STATUS_MS = 30000       # no status file from our server this long afte
 const AFTER_LISTEN_MS = 60000    # listening, but no hello through the bot's copy this long after
 const STALE_S = 30               # the status file's heartbeat (5 s) stopped this long: the server is gone
 const STALE_STARTING_S = 120     # ... while it still imports (before its heartbeat starts)
+const STALE_PLAYING_S = 20       # once the bot is up: its heartbeat stopped this long, the server is gone (a crash)
 const PHASE_TEXT = {
 	"starting": "Starting the bot server...",
 	"finding game": "Finding your game install...",
@@ -63,6 +64,7 @@ var server_pid = 0      # the pid in the status file we follow (ours: pid, or th
 var last_phase = ""
 var listen_msec = 0
 var next_poll = 0
+var crashed = false     # the bot server went away after it was up (YomiHuman.bot_crashed shows it)
 
 
 static func instance(tree):
@@ -232,6 +234,9 @@ func _process(_delta):
 		elif OS.get_ticks_msec() >= next_poll:
 			next_poll = OS.get_ticks_msec() + 1000
 			_check_server()
+	elif not waiting and not failed and not crashed and human != null and OS.get_ticks_msec() >= next_poll:
+		next_poll = OS.get_ticks_msec() + 2000
+		_check_alive()
 	if client_peer == 0 and started_msec > 0 and OS.get_ticks_msec() - started_msec > HELLO_TIMEOUT_MS and not failed:
 		started_msec = 0
 		_fail("The bot's copy of the game didn't start. Go back to the main menu and try again.")
@@ -267,6 +272,30 @@ func _check_server():
 	elif app_server and server_pid == 0 and now - spawn_msec > NO_STATUS_MS:
 		_fail("The bot server didn't start (Windows Security may have blocked yomibench-bot-server.exe: check Windows " +
 			"Security > Virus & threat protection > Protection history, and restore or allow it).")
+
+
+# Every 2 s once the bot is up (mid-match too): the server's status file still beats and doesn't say it stopped.
+func _check_alive():
+	if not app_server or server_pid == 0:
+		return
+	var st = HUMAN.server_status()
+	if st.empty() or int(st.get("pid", 0)) != server_pid:
+		return  # another server wrote it since (or it can't be read now): the client's connection still tells
+	var phase = str(st.get("phase", ""))
+	if phase == "error" or phase == "stopped" or OS.get_unix_time() - float(st.get("time", 0)) > STALE_PLAYING_S:
+		_crashed("the bot server's status says %s (last beat %d s ago)" % [phase, OS.get_unix_time() - int(float(st.get("time", 0)))])
+
+
+# The bot server went away after it was up (it crashed mid-match, or something ended it): tell the player, end the
+# bot's copy and the server (the match can't go on), and wait for them to go back to the main menu.
+func _crashed(why, text = ""):
+	if crashed or leaving:
+		return
+	crashed = true
+	_log("the bot crashed: %s; its last log line: %s" % [why, _last_log_line()])
+	_stop_children()
+	if human:
+		human.bot_crashed(text)
 
 
 # Stop waiting: say why on the panel (and in the log), with where the logs are; end the server and the bot's copy.
@@ -314,6 +343,8 @@ func _on_peer_disconnected(id):
 	if id == client_peer:
 		_log("the bot's game left")
 		client_peer = 0
+		if not waiting and not failed and not leaving:  # mid-session: it only leaves when the bot server is gone
+			_crashed("the bot's copy of the game left")
 
 
 # Client -> host: the client copy gives the token; the game's own sync_ids then makes this game P1 and it P2.
@@ -413,6 +444,11 @@ func on_mp_from_bot(sender, kind, payload):
 	elif str(kind) == "bot_unreachable":
 		if waiting:
 			_fail(str(payload))
+	elif str(kind) == "bot_crashed":
+		if waiting:
+			_fail("The bot server stopped before the bot's copy of the game reached it.")
+		else:
+			_crashed("the bot's copy of the game lost the bot server", str(payload))
 	elif human:
 		human.on_bot_message(str(kind), payload)
 
