@@ -49,3 +49,20 @@ def test_the_zip_is_deterministic(tmp_path):
     a = build_vsbot_mod.build(tmp_path / "a").read_bytes()
     b = build_vsbot_mod.build(tmp_path / "b").read_bytes()
     assert a == b
+
+
+def test_a_mid_match_bot_crash_says_so_on_both_routes():
+    human = (ROOT / "mod" / "YomiBench" / "YomiHuman.gd").read_text()
+    vsbot = (MOD / "VsBot.gd").read_text()
+    client = (MOD / "MpClient.gd").read_text()
+    text = "The bot crashed (log: %s). Go back to the main menu and start a new match."
+    assert text in human and 'server_file("bot-server.log")' in human
+    # Start-menu route (single): a lost connection is the crash message, never the old bare "Lost the bot server."
+    assert "Lost the bot server" not in human and "bot_crashed()" in human
+    # a dead server sends nothing: the connection is read once a second even with nothing waiting
+    assert "probe_at" in human and "get_partial_data(max(n, 1))" in human
+    # Multiplayer (vs bot): the client reports the loss before it quits; the host also watches the client leaving
+    # and the server's status heartbeat mid-match
+    assert "link.bot_lost(crash_text())" in human and 'to_host("bot_crashed", text)' in client
+    assert '"bot_crashed"' in vsbot and "func _check_alive" in vsbot and "STALE_PLAYING_S" in vsbot
+    assert '_crashed("the bot\'s copy of the game left")' in vsbot and "human.bot_crashed(text)" in vsbot

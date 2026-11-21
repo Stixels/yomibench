@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from yomibench import phases
 
@@ -171,6 +171,7 @@ def double_oracle(
     support_floor: float = 1e-3,
     max_rounds: int = 60,
     max_iterations: int = 32000,
+    on_round: Callable[[OracleResult], None] | None = None,
 ) -> OracleResult:
     """Equilibrium of an n_rows x n_cols zero-sum game without evaluating the whole table.
 
@@ -188,7 +189,11 @@ def double_oracle(
     columns), the same quantity `solve_both` returns for a full table.
 
     Seat-symmetric: solving the swapped game (-payoff transposed, with the starts swapped) returns
-    exactly the swapped result, so neither seat is favored by the solver itself."""
+    exactly the swapped result, so neither seat is favored by the solver itself.
+
+    `on_round` (optional) sees each round's result as soon as it is solved, converged or not: a
+    caller that may be stopped mid-search keeps the latest one as its best-so-far answer (human
+    play's turn timer, yomibench.anytime). It only observes; the search is the same with or without it."""
     known: dict[tuple[int, int], float] = {}
 
     def need(pairs):
@@ -214,8 +219,10 @@ def double_oracle(
         v = (sum(row[i] * u_row[i] for i in r_supp) + sum(col[j] * u_col[j] for j in c_supp)) / 2
         lower, upper = min(u_col), max(u_row)
         result = OracleResult(row, col, lower, upper, known, rounds, False)
-        if upper - v <= tolerance and v - lower <= tolerance:
-            result.converged = True
+        result.converged = upper - v <= tolerance and v - lower <= tolerance
+        if on_round is not None:
+            on_round(result)
+        if result.converged:
             return result
         add_r = [i for g, i in sorted(((u_row[i] - v, i) for i in range(n_rows) if i not in rs), reverse=True)
                  [:add_per_round] if g > tolerance]

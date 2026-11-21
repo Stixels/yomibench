@@ -18,14 +18,22 @@ game's state. The server holds an engine match that follows the real one:
 Messages are JSON lines over TCP on 127.0.0.1, one reply per request, in order (see
 docs/PLAYING.md). Nothing here records a player name: the human seat is "human".
 
+No turn timer (timer off, or the standard settings): the bot's full search always finishes; nothing
+here cuts it short.
+
 Turn timer: when the match has one (`timer_mode` not "none"; never in singleplayer's default
 settings), every decision is answered before it runs out, in every search mode: by the decision's
-time less max(2 s, 15%) (configurable), playing production's quick turn if the full search hasn't
-finished (yomibench.anytime). The timer settings are the game's clock, not the simulation: they are
-never sent to the sim.
+time less max(2 s, 15%) (configurable). The time goes to the full search first; if the deadline cuts
+it, its best-so-far mix is played, and production's quick turn only if the full search solved nothing
+by an emergency point (yomibench.anytime). The timer settings are the game's clock, not the
+simulation: they are never sent to the sim.
 
-Think until lock-in (option `think_until_lockin`, default off): the bot finishes its full search,
-then keeps deepening it (yomibench.anytime) until the human locks in. The mod tells the server only
+Each decision's log line says what produced the bot's move (`bot.path`: full, partial-full, quick or
+continue), with its think time and the clock it left (`bot.clock`); the result line counts the paths.
+
+Think until lock-in (option `think_until_lockin`, default on): the bot finishes its full search,
+then keeps deepening it (yomibench.anytime) until the human locks in, or `think_cap` seconds (default 60)
+after the decision opened, whichever is first. The mod tells the server only
 THAT the human locked in, with a one-way `{"type": "locked_in", "turn": N}` (no reply); a timer's
 `deadline` likewise. Those carry only type and turn, and anything more is refused whole.
 
@@ -384,6 +392,7 @@ class Game:
         self.timer: anytime.GameTimer | None = None  # the bot's turn clock (None: no turn timer)
         self.turn_s: float | None = None  # one turn of the match's turn timer: every answer's ceiling
         self.deadline_hits = 0  # decisions whose deadline cut the production search
+        self.paths: dict[str, int] = {}  # what produced each searched move (anytime.PATHS): count per path
         self.file = open(path, "w", encoding="utf-8", newline="\n")
 
     @property
@@ -407,7 +416,8 @@ class Session:
                  engine_factory: Callable[[], Engine] | None = None, ledger_path: Path | str | None = None,
                  schedule: list[tuple[str, str, int]] | None = None, mode: str = "human", scene: str | None = None,
                  model: dict[str, Any] | None = None, pick: str = "mixed", show_estimate: bool = False,
-                 settings: str = "standard", think_until_lockin: bool = False, turn_timer: bool | None = None,
+                 settings: str = "standard", think_until_lockin: bool = True, turn_timer: bool | None = None,
+                 think_cap: float = anytime.THINK_CAP_S,
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
                  deadline_fraction: float = anytime.DEADLINE_FRACTION, log: Callable[[str], None] = print,
                  engine_spec: str | None = None):
@@ -418,6 +428,9 @@ class Session:
             raise ValueError(f"deadline margin must be >= 0 s and its fraction in [0, 1): {deadline_margin}, "
                              f"{deadline_fraction}")
         self.deadline_margin, self.deadline_fraction = deadline_margin, deadline_fraction
+        if not think_cap > 0:
+            raise ValueError(f"the think cap must be > 0 s: {think_cap}")
+        self.think_cap = float(think_cap)
         self.bot = make_bot(bot_spec)
         if getattr(self.bot, "playout_cap", None):  # human play always searches full turns
             raise ValueError(f"{bot_spec}: human play searches every turn in full; drop the @cheap option")
@@ -459,6 +472,13 @@ class Session:
         self.log = log
         self.game: Game | None = None
         self.results: list[dict[str, Any]] = []  # one summary per finished or abandoned game
+        from yomibench.search import SOLVER
+
+        # Which regret-matching loop the search runs (native yomisolve, or the ~30-130x slower pure-Python loop);
+        # every game header's bot_config names it too.
+        self.solver = SOLVER
+        log(f"bot search solver: {SOLVER}" + ("" if SOLVER == "native" else
+                                               " (the native yomisolve extension isn't installed: slower searches)"))
 
     # --- protocol ---------------------------------------------------------------------------
 
@@ -582,7 +602,8 @@ class Session:
         g.match_settings, g.preset = overrides, preset
         g.settings = dict(settings)
         g.timer = anytime.GameTimer.of(timer)
-        g.turn_s = anytime.turn_seconds(timer)  # every answer beats one turn of the match's turn timer
+        # With a running timer, every answer beats one turn of it; without one there is no deadline at all.
+        g.turn_s = anytime.turn_seconds(timer) if g.timer is not None else None
         refused = None
         try:
             g.obs = self.engine.new_match(p1, p2, seed, settings=overrides or None)
@@ -663,12 +684,24 @@ class Session:
         # The time this answer has: one turn of the match's turn timer, or less if a bank has less left.
         available = min((t for t in (bank, g.turn_s) if t is not None), default=None)
         if available is not None and clock.hard_at is None:
-            clock.hard_at = clock.t0 + anytime.answer_within(available, self.deadline_margin, self.deadline_fraction)
+            within = anytime.answer_within(available, self.deadline_margin, self.deadline_fraction)
+            clock.hard_at = clock.t0 + within
+            clock.emergency_at = clock.t0 + anytime.emergency_within(available, within)
+        if clock.cap_at is None:  # thinking until lock-in never runs past this, timer or not
+            clock.cap_at = clock.t0 + self.think_cap
+        pending = g.pending
         try:
             return self._decide(g, msg, turn, clock, available)
         finally:
+            took = time.monotonic() - clock.t0
             if g.timer is not None:
-                g.timer.spend(time.monotonic() - clock.t0)
+                g.timer.spend(took)
+            bot = (g.pending or {}).get("bot") if g.pending is not pending else None
+            if bot is not None:  # this decision's line: its think time and the clock it left
+                bot["clock"] = {"available_s": None if available is None else round(available, 3),
+                                "think_s": round(took, 3),
+                                "left_s": None if available is None else round(available - took, 3),
+                                "bank_s": None if g.timer is None else round(g.timer.bank, 3)}
 
     def _decide(self, g: Game, msg: dict[str, Any], turn: int, clock: anytime.Clock,
                 available: float | None) -> dict[str, Any]:
@@ -694,8 +727,12 @@ class Session:
             bot_info, depth = self._anytime(g, obs, clock, deep=think, available=available)
         else:
             bot_info = self._think(g, obs)
+            if bot_info.get("strategy") is not None:
+                bot_info["path"] = "full"  # the plain search: no deadline, it always finishes
         g.think_ms.append((time.perf_counter() - t) * 1000)
         bot_info["think_ms"] = round(g.think_ms[-1], 1)
+        if bot_info.get("path"):
+            g.paths[bot_info["path"]] = g.paths.get(bot_info["path"], 0) + 1
         g.pick = {k: bot_info["pick"][k] for k in ("action", "data", "extra")}
         line.update({"sim_turn": obs.turn, "state": obs.state, "actionable": list(obs.actionable), "bot": bot_info})
         g.pending = line
@@ -735,12 +772,12 @@ class Session:
     def _anytime(self, g: Game, obs: Observation, clock: anytime.Clock, *, deep: bool,
                  available: float | None) -> tuple[dict[str, Any], dict[str, Any]]:
         """The bot's answer from yomibench.anytime. With a turn timer (`available` seconds on the
-        bot's clock), the quick fallback first, and the clock's hard stop at the deadline; the
-        production search then runs to the end unless the deadline cuts it. With `deep` (think
-        until lock-in), deeper stages follow until the human locks in. Returns the log's bot info
-        and the reply's `depth`."""
-        out = anytime.think(self.bot, obs, BOT_SEAT, self.engine, clock,  # type: ignore[arg-type]
-                            deep=deep, quick=available is not None)
+        bot's clock), the production search runs until the clock's hard stop at the deadline: its
+        best-so-far mix if the deadline cuts it, the quick search only if it solved nothing by the
+        emergency point. Without one, nothing cuts the production search. With `deep` (think until
+        lock-in), deeper stages follow until the human locks in. Returns the log's bot info and the
+        reply's `depth`."""
+        out = anytime.think(self.bot, obs, BOT_SEAT, self.engine, clock, deep=deep)  # type: ignore[arg-type]
         style = g.options.get("pick", "mixed")
         cands = obs.candidates[BOT_SEAT]
 
@@ -751,22 +788,26 @@ class Session:
         best = out.best
         fallback = "continue" if best is None else ("quick" if best.name == "quick" else None)
         work = {k: sum(t.get("work", {}).get(k, 0) for t in out.trace) for k in anytime.new_work()}
-        notes: dict[str, Any] = {"stopped": out.stopped, "fallback": fallback, "trace": out.trace, "work": work,
+        notes: dict[str, Any] = {"path": out.path, "stopped": out.stopped, "fallback": fallback, "trace": out.trace,
+                                 "work": work,
                                  "lock_in_ms": lock_ms, "deep": deep,
                                  "deadline_s": None if clock.hard_at is None else round(clock.hard_at - clock.t0, 3),
                                  "timer_available_s": None if available is None else round(available, 3),
                                  "answered_s": round(time.monotonic() - clock.t0, 3)}
-        if out.production is None and out.stopped == "deadline":
+        if out.production is None and out.stopped in ("deadline", "emergency"):
             g.deadline_hits += 1
+            played = {"partial-full": "the full search's best so far", "quick": "the emergency quick search"}
             self.log(f"game {g.id}: turn {obs.turn}: the deadline ({notes['deadline_s']} s) cut the full search; "
-                     f"played {'Continue' if best is None else 'the quick search'}")
-        if best is None:  # the deadline cut even the quick search: P2 holds (Continue)
+                     f"played {played.get(out.path, 'Continue')}")
+        if best is None:  # nothing finished by the deadline: P2 holds (Continue)
             info: dict[str, Any] = {"n_candidates": len(cands), "n_base": len(cands), "strategy": None, "value": None,
-                                    "pick": cands[0].record(), "pick_index": 0, "pick_style": style, "fallback": True}
+                                    "pick": cands[0].record(), "pick_index": 0, "pick_style": style, "fallback": True,
+                                    "path": out.path}
             info["anytime"] = {"stage": None, **notes}
             return info, {"stage": None, "label": "out of time", "pairs": 0, "stopped": out.stopped}
         strategy, value = best.strategy(BOT_SEAT)
         info = _matrix_info(strategy, value, best.lists[BOT_SEAT], len(cands), style, rng(), best.info or None)
+        info["path"] = out.path
         notes.update(stage=best.stage, name=best.name, pairs=best.pairs)
         prod = out.production
         if prod is not None and prod is not best:  # what the plain bot would have played, for comparison
@@ -834,7 +875,7 @@ class Session:
             "final_tick": (final or {}).get("tick"),
             "final_hp": [p.get("hp") for p in (final or {}).get("players", [])] or None,
             "p2_overrides": g.p2_overrides, "p2_fallbacks": g.p2_fallbacks, "reason": reason,
-            "deadline_hits": g.deadline_hits,
+            "deadline_hits": g.deadline_hits, "paths": dict(g.paths),
             "think_ms_mean": _round(sum(g.think_ms) / len(g.think_ms), 1) if g.think_ms else None,
             "think_ms_max": _round(max(g.think_ms), 1) if g.think_ms else None,
             "seconds": round(time.time() - g.t0, 1),
@@ -1061,9 +1102,13 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--turn-timer", choices=("on", "off"), default=None,
                     help="the game's turn timer: on (ranked's chess clock; a preset without a timer gets the game's lobby timer) "
                          "or off; default: on for ranked, off for standard, as the game (changeable on the panel)")
-    ap.add_argument("--think-until-lockin", action="store_true",
-                    help="the bot keeps deepening its search until you lock in your move (after its full search, "
-                         "which always finishes first); default off (changeable on the panel)")
+    ap.add_argument("--think-until-lockin", action=argparse.BooleanOptionalAction, default=True,
+                    help="the bot keeps deepening its search until you lock in your move, after its full search "
+                         "(which always finishes first), at most --think-cap seconds a turn; default on "
+                         "(--no-think-until-lockin: answer as soon as the full search ends; changeable on the panel)")
+    ap.add_argument("--think-cap", type=float, default=anytime.THINK_CAP_S, metavar="SECONDS",
+                    help="thinking until lock-in stops this long after a turn opens even if you haven't locked in "
+                         f"(default {anytime.THINK_CAP_S:g}; a timed turn's deadline comes first)")
     ap.add_argument("--engine", default=None, metavar="sim|game-pool:N|game-pool:auto",
                     help="the bot's engine: a simulator plugin (sim) or N headless copies of your own game (game-pool, sized to "
                          "this PC with auto). Default: sim when it is installed, else game-pool:auto")
@@ -1108,7 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
     session = Session(bot.spec, bot.candidate_set, args.out, label=bot.label, scene=args.scene, schedule=schedule,
                       mode="autoplay" if schedule else "human", model=bot.model,
                       pick=args.pick, show_estimate=args.show_estimate,
-                      settings=args.settings, think_until_lockin=args.think_until_lockin,
+                      settings=args.settings, think_until_lockin=args.think_until_lockin, think_cap=args.think_cap,
                       turn_timer=None if args.turn_timer is None else args.turn_timer == "on",
                       deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
                       engine_spec=args.engine)

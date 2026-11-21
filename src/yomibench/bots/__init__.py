@@ -98,6 +98,9 @@ class MatrixBot:
         # "batched" (`make_bot`'s @value_forward=batched): the Batch engine scores this bot's two views in one
         # value-net forward (`BatchValue(batched_forward=True)`; not bit-identical). None: two forwards.
         self.value_forward: str | None = None
+        # Human play's turn timer only (yomibench.anytime): called with each double-oracle round's best-so-far
+        # (row, col, p1 value, lists, converged). None everywhere else. Not part of the search key: it observes.
+        self.progress: Callable[..., None] | None = None
         self.name = "matrix" if search == "full" else "matrix-do"
 
     def _key(self, seat: int | None = None) -> tuple:
@@ -160,11 +163,22 @@ class MatrixBot:
                         out[s][i] = v
                 return out
 
+            # `progress` (human play's turn timer, yomibench.anytime): sees every double-oracle round's strategies
+            # over this view's lists as they stand then, so a search stopped part-way still has a best-so-far mix.
+            # It only observes: the search is the same with or without it.
+            progress = getattr(self, "progress", None)
+            on_round = None
+            if progress is not None:
+                def on_round(res):
+                    progress(full(res.row, 0), full(res.col, 1), res.value, [list(cands[0]), list(cands[1])],
+                             res.converged)
+
             start = tuple(
                 [0] + random.Random(f"{match}:{obs.turn}:{obs.state.get('tick')}:{s}")
                 .sample(range(1, n), min(self.oracle_start, n - 1))
                 for s, n in enumerate((len(kept[0]), len(kept[1]))))
-            r = double_oracle(len(kept[0]), len(kept[1]), sub_pairs, self.iterations, self.tolerance, start=start)
+            r = double_oracle(len(kept[0]), len(kept[1]), sub_pairs, self.iterations, self.tolerance, start=start,
+                              on_round=on_round)
             info = {"rounds": r.rounds, "converged": r.converged, "fallback": False}
             refined = 0
             ex = self.explore
@@ -201,7 +215,7 @@ class MatrixBot:
                     kept[s] += range(lens[s], len(cands[s]))
                 support = tuple([i for i, p in enumerate(st) if p > 0] for st in (r.row, r.col))
                 r = double_oracle(len(kept[0]), len(kept[1]), sub_pairs, self.iterations, self.tolerance,
-                                  start=support)
+                                  start=support, on_round=on_round)
                 info["rounds"] += r.rounds
                 info["converged"] = r.converged
             if refined:

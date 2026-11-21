@@ -54,7 +54,7 @@ extends Node
 # `link` is the node that carries messages between the two (VsBot.gd / MpClient.gd).
 
 const PROTOCOL = 1
-const VERSION = "7"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single
+const VERSION = "8"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message
 # The characters the panel offers until the server's hello names the ones its sim plays.
 var characters = ["Ninja", "Cowboy", "Wizard", "Mutant", "Robot"]
 
@@ -137,6 +137,10 @@ var remote_status = {}   # host: what the client last reported (turn, desynced, 
 var p1_locked_tick = -1000  # client: the decision tick P1 locked in at (the game's "turn ready", no move)
 var p1_lock_msec = 0     # host: when P1 locked in this turn
 var autoplay_wait = 0.0
+var crashed = false      # the bot server went away (a crash): the panel says so until the bot is back
+var probe_at = 0         # next read that checks the server connection is still there (a dead peer sends nothing)
+# What the panel says when the bot server goes away mid-match (or at any time once it was up).
+const CRASH_TEXT = "The bot crashed (log: %s). Go back to the main menu and start a new match."
 
 
 func _ready():
@@ -298,18 +302,19 @@ func _net():
 		callbacks.clear()
 		inbuf = ""
 		if side == "client":
-			link.bot_lost()  # the server stopped (the game quit): this copy quits too
+			link.bot_lost(crash_text())  # the server went away: the host shows why, and this copy quits
 			return
-		_say("Lost the bot server. Restart tools/human_play.py." if not hosted else "Lost the bot server.")
-		if phase == "playing" or phase == "starting":
-			phase = "idle"
+		bot_crashed()
 		return
 	if not connected:
 		return
+	# A server that died sends nothing: once a second read even with nothing waiting, so a closed or reset
+	# connection is noticed (the read then fails and the status above turns to not connected).
 	var n = peer.get_available_bytes()
-	if n > 0:
-		var r = peer.get_partial_data(n)
-		if r[0] == OK:
+	if n > 0 or OS.get_ticks_msec() >= probe_at:
+		probe_at = OS.get_ticks_msec() + 1000
+		var r = peer.get_partial_data(max(n, 1))
+		if r[0] == OK and r[1].size() > 0:
 			inbuf += r[1].get_string_from_utf8()
 	var i = inbuf.find("\n")
 	while i >= 0:
@@ -346,6 +351,8 @@ func _on_hello(r):
 		_say("The bot server refused: %s" % str(r.get("message")))
 		return
 	server = r
+	var was_crashed = crashed
+	crashed = false
 	if side == "client":  # the panel is the host's
 		phase = "idle"
 		link.to_host("hello", r)
@@ -369,6 +376,9 @@ func _on_hello(r):
 		think_box.pressed = bool(opts.get("think_until_lockin", false)) or timer_box.pressed
 	if autoplay:
 		_next_or_quit(r.get("next"))
+	elif was_crashed:  # the launcher restarted the bot after a crash
+		_show_panel(_panel_title(), "The bot crashed during the last match and has restarted. Go back to the main " +
+			"menu, then press Start game for a new match.")
 	else:
 		_show_panel(_panel_title(), "")
 
@@ -1176,6 +1186,36 @@ func show_wait(t, text):
 		_show_panel(t, text)
 
 
+# The bot server's log (where a crash's details are), as a Windows path.
+static func crash_text():
+	return CRASH_TEXT % server_file("bot-server.log").replace("/", "\\")
+
+
+# The bot server went away (it crashed, or something ended it): say so, on top of the match. Single: the lost
+# connection; host: the client's report, its leaving, or the server's status file going stale (VsBot.gd).
+func bot_crashed(text = ""):
+	if crashed:
+		return
+	crashed = true
+	if text == "":
+		text = crash_text()
+	print("YOMIHUMAN_CRASH ", text)
+	_release_clock()
+	pick_pending = false
+	if phase == "playing" or phase == "starting" or phase == "ended":
+		phase = "idle"
+	if autoplay:  # a test: end with an error the rig can see
+		emit_signal("quitting")
+		get_tree().quit(4)
+		return
+	if panel != null:
+		title.text = "YomiBench: the bot crashed"
+		info.text = text
+		panel.show()
+	if status != null:
+		status.text = "YomiBench: the bot crashed. Go back to the main menu and start a new match."
+
+
 func _on_back_pressed():
 	if (phase == "playing" or phase == "starting") and side == "single":
 		_send({"type": "abort", "reason": "back to the main menu"})  # host: the client goes with the session
@@ -1220,7 +1260,7 @@ func _say(t):
 
 
 func _update_status():
-	if status == null:
+	if status == null or crashed:
 		return
 	if side == "host":
 		_update_host_status()
