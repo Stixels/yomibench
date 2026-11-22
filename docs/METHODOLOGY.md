@@ -42,6 +42,9 @@ A new net is promoted only if it beats the current best in a test whose rule is 
 pairs (each seed played from both sides), staged so that a clear result stops early, with 95% confidence
 intervals. Promotion is decided on the result over all matchups, and a floor per matchup blocks a large
 regression in one; a small matchup can still come out below 50% (each generation's page shows them).
+From generation 16 the test is sequential: a GSPRT over up to 400 pairs, looked at every 20 pairs, with both bots
+playing every character (weighted toward Cowboy, as in training), a guard per character and a floor on the
+Cowboy mirror.
 
 ## 7. Ratings
 
@@ -49,6 +52,6 @@ The leaderboard fits a Bradley–Terry model over every published head-to-head r
 the Arena's own ranked games as they come in) and shows it on an Elo-like scale. Two caveats go with it:
 
 - A chain of promotion tests alone overstates gains, since a promoted net is the one that happened to win its test.
-  The Arena's round-robin games correct for that.
+  The Arena's own ranked games will correct for that once the redesigned Arena runs.
 - Settings changed between eras (characters, candidate sets, the ranked preset). Ratings compare cleanly only
   within an era, and the chart marks the breaks.

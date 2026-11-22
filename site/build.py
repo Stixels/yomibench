@@ -420,6 +420,36 @@ def cowboy_gate(rel: dict) -> bool:
     return bool(keys) and all(k.startswith("Cowboy vs ") for k in keys)
 
 
+def cast_gate(rel: dict) -> bool:
+    """The sequential promotion test (generation 16 on): both bots play every character from both seats, so the
+    matchup cells cover all 25 pairings (weighted toward Cowboy, as training is)."""
+    keys = list((rel["gate"].get("matchups") or {}))
+    return len(keys) == len(CHARACTERS) ** 2 and any(not k.startswith("Cowboy vs ") for k in keys)
+
+
+def gate_history(rels: list[dict]) -> str:
+    """The kinds of promotion test the published generations had, oldest first."""
+    def span(gs):
+        return f"generation {gs[0]}" if len(gs) == 1 else f"generations {gs[0]} to {gs[-1]}"
+    cow = [r["generation"] for r in rels if cowboy_gate(r)]
+    cast = [r for r in rels if cast_gate(r)]
+    early = [r["generation"] for r in rels if not cowboy_gate(r) and not cast_gate(r)
+             and (not cow or r["generation"] < cow[0])]
+    out = []
+    if early:
+        out.append(f"For {span(early)} the test played Cowboy and Ninja from both seats.")
+    if cow:
+        out.append(f"For {span(cow)} it was Cowboy-focused: the new generation played Cowboy in every game, mostly "
+                   f"the mirror.")
+    if cast:
+        last = cast[-1]
+        pairs = int(last["gate"]["pooled"]["games"]) // 2
+        out.append(f"From generation {cast[0]['generation']} it is sequential: up to 400 seat-swapped pairs with both "
+                   f"bots playing every character, weighted toward Cowboy as in training, stopping early once the "
+                   f"result is significant (generation {last['generation']}: {pairs} pairs, {2 * pairs} games).")
+    return " ".join(out)
+
+
 def character_results(rows: list[dict], rels: list[dict]) -> dict[str, list[tuple]]:
     """{character: [(bot, opponent, score, games, source)]}: each game counted for the side that played that
     character. The Arena's games give every character; promotion tests give only Cowboy, and only the Cowboy-focused
@@ -535,6 +565,8 @@ def what_changed(r, prev) -> list[str]:
     chars = lambda x: {c for k in (x["gate"]["matchups"] or {}) for c in k.split(" vs ")}  # noqa: E731
     if len(chars(r)) > len(chars(prev)):
         out.append(f"Promotion test widened to Cowboy against all {len(chars(r))} characters")
+    if cast_gate(r) and not cast_gate(prev):
+        out.append("Sequential promotion test: every character on both sides, stopping early once significant")
     return out or ["Same settings, more training"]
 
 
@@ -647,13 +679,14 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
                      f'<th class="num">Rating as {c}</th><th class="num">Games as {c}</th></tr></thead>'
                      f'<tbody>{body_rows}</tbody></table></div>')
         else:
-            inner = f'<p class="small empty">No games as {c} yet. They come from the Arena\'s round-robin.</p>'
+            inner = f'<p class="small empty">No games as {c} yet. They will come from the redesigned Arena.</p>'
         panels.append(f'<div class="tp tp-{c}">{inner}</div>')
     by_character = (f'<section class="bychar"><div class="sechead"><h2>Rating by character</h2><span class="small">'
                     f'approximate 95% interval</span></div><p class="small note">How strong each bot is when it plays '
                     f'that character: the rating that best explains its results as that character, against opponents '
                     f'at their overall ratings. The Arena\'s games count for every character. Promotion tests count only '
-                    f'for Cowboy, and only the Cowboy-focused ones, so Cowboy numbers from them alone are provisional. The intervals '
+                    f'for Cowboy, and only the Cowboy-focused ones, so Cowboy numbers from them alone are provisional. The '
+                    f'sequential tests (generation 16 on) seat-swap every character, so they don\'t count here. The intervals '
                     f'take the opponents\' ratings as given, so they are narrower than the overall ones.'
                     f'</p><div class="tabs">{"".join(tabs)}<div class="tabpanels">{"".join(panels)}</div></div>'
                     f'</section>')
@@ -665,11 +698,9 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
     else:
         board_title = "House promotion history (provisional)"
         note = ("Until the Arena's own ranked matches are in, this table is HustleBot's history, and provisional: "
-                "each generation rated from the promotion tests that published it, in the settings of its era. Those "
-                "tests are Cowboy-focused (in the current era the new generation plays Cowboy in every game: 60 mirror "
-                "pairs and 16 pairs against each other character), so compare ratings within an era. The Arena's "
-                f"round-robin of the current era is under way ({sum(r['games'] for r in rows)} games so far) and takes "
-                f"over once every bot has {ARENA_ONLY_GAMES}. {pooled}")
+                "each generation rated from the promotion test that published it, in the settings of its era. "
+                f"{gate_history(rels)} Compare ratings within an era. The Arena is being redesigned, with two "
+                f"divisions coming (model alone and full bot); its ranked games take over once it is back. {pooled}")
     era_start = ERA_STARTS.get(spec_hash(aspec)) if aspec else None
     if era_start:
         note += (f" A new rating era started with spec {spec_hash(aspec)} on {era_start[0]}; earlier provisional "
