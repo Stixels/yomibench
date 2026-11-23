@@ -39,6 +39,8 @@ extends Node
 # `moves` (every menu move, legality, widgets) and `probe` (candidates at chosen widget values).
 # `step_raw` plays each seat's exact input ({action, data, extra}, on or off the candidate grid),
 # refusing inputs a player could not have sent (YomiMatch.step_raw).
+# `raw_option_by_id: true` on step_raw checks option widgets' data against the selected item's
+# panel output instead of the default item's (off by default; YomiMatch.step_raw).
 # `action_space` describes everything each seat can choose now, read off the game's own action
 # menu: legal moves, each move's widgets and ranges, reverse / feint / DI, the extra panel's
 # controls and which toggle reveals each (ActionSpace.gd; read-only).
@@ -528,7 +530,7 @@ func _handle_line(line, cmd_out):
 	if cmd == "step_raw":
 		if match_.done():
 			return _err("match_over", "the match has ended")
-		var why = match_.step_raw(msg.get("inputs"))
+		var why = match_.step_raw(msg.get("inputs"), msg.get("raw_option_by_id") == true)
 		if why != "":
 			return _err("bad_request", why)
 		return match_.observation(detail)

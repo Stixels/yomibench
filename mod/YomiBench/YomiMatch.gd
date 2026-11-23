@@ -345,12 +345,17 @@ func _play(c1, c2, trace_):
 #           move can feint, reverse only where it can be reversed
 # Numbers may come as JSON floats; "[Object:null]" (JSON.print's null Object) and {"$d": [[k, v],
 # ...]} (the recorder's typed dicts) are read the way a recorded game stores them.
-func step_raw(inputs):
+# option_by_id (the request's raw_option_by_id, default off): an option widget's data (e.g. Ninja
+# QuickSlash's Attack) is checked against what the panel sends with the recorded id selected, not
+# against its default item: the game's ActionUIDataOptionButton sends {id, name: items[id]}, and
+# Godot 3's flat OptionButton.items makes that name "No Attack" / null / false / 0 for ids 0-3. On,
+# the id must be an enabled item and the name must equal the panel's; off, today's check exactly.
+func step_raw(inputs, option_by_id = false):
 	if typeof(inputs) != TYPE_ARRAY or inputs.size() != 2:
 		return "inputs must be [{action, data, extra} for P1, {action, data, extra} for P2]"
 	var cs = []
 	for seat in range(2):
-		var c = _raw_input(seat, inputs[seat])
+		var c = _raw_input(seat, inputs[seat], option_by_id)
 		if typeof(c) == TYPE_STRING:
 			return "seat %d: %s" % [seat, c]
 		cs.append(c)
@@ -359,7 +364,7 @@ func step_raw(inputs):
 	return ""
 
 
-func _raw_input(seat, inp):
+func _raw_input(seat, inp, option_by_id = false):
 	if typeof(inp) != TYPE_DICTIONARY or typeof(inp.get("action")) != TYPE_STRING:
 		return "an input is {action (a string), data, extra}"
 	var gen = gens[seat]
@@ -380,10 +385,24 @@ func _raw_input(seat, inp):
 		if data != null:
 			errs.append("data must be null for %s (it has no data scene)" % action)
 	else:
-		var like = gen._open_data_node(state).get_data()
+		var node = gen._open_data_node(state)
+		var like
+		var options = []
+		if option_by_id:
+			like = _raw_option_like(node, data, options, errs)
+		else:
+			like = node.get_data()
 		if typeof(like) == TYPE_DICTIONARY or typeof(like) == TYPE_ARRAY:
 			like = like.duplicate(true)
 		data = _raw_like(data, like, "data", errs)
+		if errs.empty():
+			for k in options:
+				if typeof(data) != TYPE_DICTIONARY or typeof(data.get(k)) != TYPE_DICTIONARY:
+					continue
+				if typeof(like.get(k)) != TYPE_DICTIONARY or not like[k].has("id"):
+					continue
+				if not _raw_same(data[k].get("name"), like[k].get("name")):
+					errs.append("data.%s.name must be what the panel sends for item %d (%s)" % [k, like[k].id, str(like[k].name)])
 	if not errs.empty():
 		return errs[0]
 	var di = extra.DI
@@ -407,6 +426,56 @@ func _raw_input(seat, inp):
 				names.append(s.name)
 			return "%s is not legal now with these extras (legal: %s)" % [action, PoolStringArray(names).join(", ")]
 	return {"action": action, "data": data, "extra": extra}
+
+
+# step_raw's raw_option_by_id: the data scene's get_data() with each option widget (an OptionButton
+# with get_data, keyed by its node name as the data scene sends it) set to the item the recorded
+# data selects; every selection is put back afterwards, so the panel the candidates read is
+# unchanged. Appends why to errs for an id that no enabled item has; `options` gets the keys set.
+func _raw_option_like(node, data, options, errs):
+	if typeof(data) != TYPE_DICTIONARY:
+		return node.get_data()
+	var widgets = []
+	_raw_option_widgets(node, widgets)
+	var saved = []
+	for n in widgets:
+		var k = str(n.name)
+		var v = data.get(k)
+		if typeof(v) != TYPE_DICTIONARY or not v.has("id") or k in options:
+			continue
+		var id = v.id
+		if not (typeof(id) in [TYPE_INT, TYPE_REAL]) or float(id) != floor(float(id)):
+			errs.append("data.%s.id must be an integer" % k)
+			continue
+		id = int(id)
+		if id < 0 or id >= n.get_item_count() or n.is_item_disabled(id):
+			errs.append("data.%s.id %d is not an enabled item of the panel (%d items)" % [k, id, n.get_item_count()])
+			continue
+		saved.append([n, n.selected])
+		n.select(id)
+		options.append(k)
+	var like = node.get_data()
+	if typeof(like) == TYPE_DICTIONARY or typeof(like) == TYPE_ARRAY:
+		like = like.duplicate(true)
+	saved.invert()
+	for s in saved:
+		s[0].select(s[1])
+	return like
+
+
+func _raw_option_widgets(n, out):
+	for c in n.get_children():
+		if c is OptionButton and c.has_method("get_data"):
+			out.append(c)
+		else:
+			_raw_option_widgets(c, out)
+
+
+# Equal values of one type; numbers compare by value (JSON sends 0 as 0.0).
+func _raw_same(a, b):
+	if typeof(a) in [TYPE_INT, TYPE_REAL] and typeof(b) in [TYPE_INT, TYPE_REAL]:
+		return float(a) == float(b)
+	return typeof(a) == typeof(b) and a == b
 
 
 # Raw-input reading: "[Object:null]" is null, {"$d": [[key, value], ...]} a dict.
