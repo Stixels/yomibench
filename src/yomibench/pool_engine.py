@@ -118,9 +118,11 @@ class PoolEngine(Engine):
         self._release_all()
         return self._all(lambda e: e.step(a1, a2))
 
-    def step_raw(self, inputs: list[dict[str, Any]]) -> Observation:
+    def step_raw(self, inputs: list[dict[str, Any]], raw_option_by_id: bool = False) -> Observation:
         self.turn_cache = {}
         self._release_all()
+        if raw_option_by_id:
+            return self._all(lambda e: e.step_raw(inputs, raw_option_by_id=True))
         return self._all(lambda e: e.step_raw(inputs))
 
     def preview(self, pairs: list[tuple[int, int]], candidates: bool = True) -> list[Observation]:

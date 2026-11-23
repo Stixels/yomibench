@@ -256,11 +256,16 @@ class Engine:
             self.match_seed = seed
         return Observation.parse(resp) if "state" in resp else self.observe()
 
-    def step_raw(self, inputs: list[dict[str, Any]]) -> Observation:
+    def step_raw(self, inputs: list[dict[str, Any]], raw_option_by_id: bool = False) -> Observation:
         """Engines that follow recorded games only: play P1's and P2's inputs ({action, data, extra} each) exactly as given,
-        on or off the candidate grid, and answer like `step` (human play follows a real game)."""
+        on or off the candidate grid, and answer like `step` (human play follows a real game). `raw_option_by_id`: the real
+        game's mod checks an option widget's data against the panel's output for the recorded id, not its default item
+        (YomiMatch.step_raw); off sends the request unchanged."""
         self.turn_cache = {}
-        return Observation.parse(self._call({"cmd": "step_raw", "inputs": inputs}))
+        msg: dict[str, Any] = {"cmd": "step_raw", "inputs": inputs}
+        if raw_option_by_id:
+            msg["raw_option_by_id"] = True
+        return Observation.parse(self._call(msg))
 
     def preview(self, pairs: list[tuple[int, int]], candidates: bool = True) -> list[Observation]:
         """One observation (with a `handle`) per pair. `candidates=False` skips the candidate
