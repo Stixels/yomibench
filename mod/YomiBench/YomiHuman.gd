@@ -1370,8 +1370,8 @@ func _make_overlay():
 	l3.text = "Bot style:"
 	row2.add_child(l3)
 	pick_opt = OptionButton.new()
-	pick_opt.add_item("unpredictable (mixes its moves)")  # pick "mixed": samples its strategy
-	pick_opt.add_item("strongest move only")              # pick "strongest": its most likely move
+	pick_opt.add_item("unpredictable (mixes its moves; recommended)")  # pick "mixed": samples its strategy
+	pick_opt.add_item("strongest move only")              # pick "strongest": its most likely move (Burst still mixed)
 	row2.add_child(pick_opt)
 	estimate_box = CheckBox.new()
 	estimate_box.text = "Show the bot's win estimate"

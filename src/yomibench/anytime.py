@@ -99,6 +99,12 @@ LOCK_CAP_S = 10.0
 # theirs, but never plans a decision past (bank left - BANK_RESERVE_S) (human_play --bank-reserve). With no more room
 # than the floor's own stop it plays on the floor, the per-turn deadline every timed turn has (bank_budget).
 BANK_RESERVE_S = 60.0
+# On a chess bank turn the production search may use all of the room above the reserve, but the optional deeper stages
+# after it (widen, two-decision) stop at 1/BANK_DEEP_TURNS of that room (bank_deep_s; human_play --bank-deep-turns): the
+# game charges the bot's clock while it waits on the human, and thinking until every lock-in drained a 900 s bank to
+# the floor in every g16 audit game (by turn 29-74). A share of what is left shrinks as the bank does, so it never
+# reaches the floor by itself.
+BANK_DEEP_TURNS = 100.0
 PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed answer (human play logs it per turn)
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
 # The match settings that are the game's turn clock, not the simulation (ui/UILayer.gd and main.gd
@@ -262,6 +268,13 @@ def bank_budget(bank_left: float, turn_s: float, reserve_s: float = BANK_RESERVE
     if room > floor:
         return "bank", room
     return "floor", floor
+
+
+def bank_deep_s(bank_left: float, reserve_s: float = BANK_RESERVE_S, turns: float = BANK_DEEP_TURNS) -> float:
+    """How long into a chess-clock bank turn the optional deeper stages may run: this turn's share of the room above
+    the reserve, (bank_left - reserve_s) / turns (900 s and the 60 s reserve: 8.4 s). The production search is not
+    bound by it (only the bank budget's hard stop and the after-lock cap cut that)."""
+    return max(0.0, bank_left - reserve_s) / turns
 
 
 def _num(v: Any) -> float | None:

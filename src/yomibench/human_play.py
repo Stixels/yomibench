@@ -43,9 +43,12 @@ best so far (`partial-full`). The mod sends `locked_in` in every untimed match f
 Timed decisions keep their turn deadline only, except on a chess clock (ranked, since g15's build): there the bot
 spends its bank about as the human spends theirs. While its bank has room above the reserve (`bank_reserve`, 60 s)
 it thinks until the human locks in, then at most `lock_cap` more (or less if its searches end), never past (bank
-left - reserve); with less room it plays on the floor, the per-turn deadline above (anytime.bank_budget). The bank
-is the game's own P2 clock as the mod reads it at the turn's open (`bot_clock_s` in the decision), else the bot's
-model of it. Each decision logs `bank_left_s`, `budget_s` and `mode` (bank | floor) in its `clock`.
+left - reserve); with less room it plays on the floor, the per-turn deadline above (anytime.bank_budget). The
+production search may use that whole room; the optional deeper stages after it stop at the turn's share of the room,
+(bank left - reserve) / `bank_deep_turns` (anytime.bank_deep_s; 840 s of room: 8.4 s), since the game charges the
+bot's clock while it waits on the human. The bank is the game's own P2 clock as the mod reads it at the turn's open
+(`bot_clock_s` in the decision), else the bot's model of it. Each decision logs `bank_left_s`, `budget_s`, `deep_s` and
+`mode` (bank | floor) in its `clock`.
 
 A forfeit (the game's pause menu): the mod's `end` carries `forfeit: 0` (P1, the human, forfeited) and the winner;
 the game is recorded as finished (`reason` "forfeit"), the sim's position as it was (its match never ended).
@@ -103,9 +106,16 @@ DEFAULT_BEST = _localconfig.load().best_url or str(Path.home() / ".yomibench" / 
 PRODUCTION_SET = 6  # the candidate set production and gates play: set 6 (set 5 with all four switches, plus the
 # expand-only toggle pairs and clicks), rules 3b8bb1b76cd8; the simulator must be a set-6 build (f9cd2f1 or later)
 GEN = re.compile(r"^gen-(\d+)$")
-# How the bot turns its solved mixed strategy into one move: "mixed" samples it (the equilibrium
-# play: unpredictable, so it can't be read and punished), "strongest" plays its most likely move.
+# How the bot turns its solved mixed strategy into one move: "mixed" (the default, and the panel's recommended style)
+# samples it (the equilibrium play: unpredictable, so it can't be read and punished), "strongest" plays its most
+# likely move, except Burst against Continue/DI (BURST_ACTIONS; pick_index).
 PICK_STYLES = ("mixed", "strongest")
+# The defensive bursts (the game's Burst out of hitstun, as candidates name it). In a simultaneous game Burst against
+# Continue/DI is a mixed choice at equilibrium (a predictable Burst gets parried), so "strongest" never takes the
+# argmax between them: with any weight on Burst it plays Burst with exactly its equilibrium probability. Argmax
+# starved Burst to 0% whenever one DI direction outweighed it (a lost game in the g16 human audit: 0 bursts in 166
+# turns, holding one, with Burst at 15-39% on eight turns of the final combo).
+BURST_ACTIONS = frozenset({"Burst", "DefensiveBurst"})
 # Match settings presets (the panel's "Settings"): overrides of the standard online lobby's settings
 # (the sim's hello `match_settings`). The mod applies the chosen one to the real match and reports the
 # match's settings; the server starts the sim with whatever differs from standard (Engine.new_match's
@@ -345,11 +355,33 @@ def _round(x: float | None, nd: int = 6) -> float | None:
     return None if x is None else round(float(x), nd)
 
 
-def pick_index(strategy: list[float], style: str, rng: random.Random) -> int:
-    """The move a strategy plays: sampled ("mixed") or its most likely one ("strongest"; the first
-    of equals)."""
+def _argmax(strategy: list[float], among: list[int]) -> int:
+    return max(among, key=lambda k: (strategy[k], -k))  # the first of equals
+
+
+def burst_mass(strategy: list[float], actions: list[str] | None) -> float:
+    """The strategy's total weight on a defensive Burst (BURST_ACTIONS); 0 without actions."""
+    if not actions:
+        return 0.0
+    return sum(p for p, a in zip(strategy, actions) if p > 0 and a in BURST_ACTIONS)
+
+
+def pick_index(strategy: list[float], style: str, rng: random.Random, actions: list[str] | None = None) -> int:
+    """The move a strategy plays: sampled ("mixed") or its most likely one ("strongest"; the first of equals).
+
+    "strongest" with weight on a defensive Burst (`actions`, the candidates' action names): Burst against the rest is
+    drawn from the equilibrium, Burst with probability = its total weight, then the most likely move within the side
+    drawn. So "strongest" bursts as often as the equilibrium does, never 0% (BURST_ACTIONS)."""
     if style == "strongest":
-        return max(range(len(strategy)), key=lambda k: (strategy[k], -k))
+        q = burst_mass(strategy, actions)
+        if q > 0:
+            assert actions is not None
+            bursts = [k for k, a in enumerate(actions) if a in BURST_ACTIONS and strategy[k] > 0]
+            rest = [k for k in range(len(strategy)) if k not in bursts and strategy[k] > 0]
+            if not rest or rng.random() < q:
+                return _argmax(strategy, bursts)
+            return _argmax(strategy, rest)
+        return _argmax(strategy, list(range(len(strategy))))
     (i,) = rng.choices(range(len(strategy)), weights=strategy)
     return i
 
@@ -363,11 +395,14 @@ def _matrix_info(strategy: list[float], value: float, lst: list[Any], n_base: in
                  rng: random.Random, oracle: dict[str, Any] | None) -> dict[str, Any]:
     """A matrix bot's answer as the turn log keeps it: its support over its candidate list `lst`,
     its value, and the pick drawn from `rng` in `style`."""
-    i = pick_index(strategy, style, rng)
+    actions = [c.action for c in lst]
+    i = pick_index(strategy, style, rng, actions)
     support = [{"i": k, "p": _round(p), **lst[k].record()} for k, p in enumerate(strategy) if p > 0]
     info: dict[str, Any] = {"n_candidates": len(lst), "n_base": n_base, "strategy": support,
                             "value": _round(value), "pick": lst[i].record(), "pick_index": i,
                             "pick_style": style}
+    if style == "strongest" and burst_mass(strategy, actions) > 0:
+        info["pick_rule"] = "burst-mixed"  # Burst against the rest drawn from the equilibrium (pick_index)
     if oracle is not None:
         info["oracle"] = oracle
     return info
@@ -435,9 +470,12 @@ class Session:
                  settings: str = "standard", think_until_lockin: bool = True, turn_timer: bool | None = None,
                  think_cap: float = anytime.THINK_CAP_S, lock_cap: float = anytime.LOCK_CAP_S,
                  bank_reserve: float = anytime.BANK_RESERVE_S,
+                 bank_deep_turns: float = anytime.BANK_DEEP_TURNS,
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
                  deadline_fraction: float = anytime.DEADLINE_FRACTION, log: Callable[[str], None] = print,
-                 engine_spec: str | None = None):
+                 engine_spec: str | None = None, bot_factory: Callable[[str], Any] | None = None):
+        """`bot_factory(bot_spec)` builds the bot (default yomibench.bots.make_bot): a build that plays a search
+        variant of its own (e.g. a candidate set's extra pass) passes its own."""
         from yomibench.bots import make_bot
 
         self.bot_spec, self.candidate_set = bot_spec, candidate_set
@@ -454,7 +492,10 @@ class Session:
         if not bank_reserve >= 0:
             raise ValueError(f"the bank reserve must be >= 0 s: {bank_reserve}")
         self.bank_reserve = float(bank_reserve)
-        self.bot = make_bot(bot_spec)
+        if not bank_deep_turns > 0:
+            raise ValueError(f"bank deep turns must be > 0: {bank_deep_turns}")
+        self.bank_deep_turns = float(bank_deep_turns)
+        self.bot = (bot_factory or make_bot)(bot_spec)
         if getattr(self.bot, "playout_cap", None):  # human play always searches full turns
             raise ValueError(f"{bot_spec}: human play searches every turn in full; drop the @cheap option")
         self.label = label or self.bot.name
@@ -722,17 +763,21 @@ class Session:
             if g.timer.mode == "chess":
                 bank = max(bank, g.timer.turn_min)
             g.timer.bank = bank
-        plan = budget = None
+        plan = budget = deep = None
         if bank is not None and g.timer.mode == "chess" and g.turn_s is not None:
             plan, budget = anytime.bank_budget(bank, g.turn_s, self.bank_reserve, self.deadline_margin,
                                                self.deadline_fraction)
         if plan == "bank" and clock.hard_at is None:
-            # The bank's room: think while the human does, then the after-lock cap; never past the reserve.
+            # The bank's room: the production search may use all of it (the hard stop), then the after-lock cap; never
+            # past the reserve. The optional deeper stages stop at this turn's share of the room (bank_deep_s): the
+            # game charges the bot's clock while it waits on the human, so thinking until every lock-in drained the
+            # bank to the floor in every g16 audit game.
             available = budget
+            deep = anytime.bank_deep_s(bank, self.bank_reserve, self.bank_deep_turns)
             clock.hard_at = clock.t0 + budget
             clock.emergency_at = clock.t0 + anytime.emergency_within(budget, budget)
             clock.lock_cap = self.lock_cap
-            clock.cap_at = clock.t0 + budget
+            clock.cap_at = clock.t0 + min(budget, deep)
         else:
             # The time this answer has: one turn of the match's turn timer, or less if a bank has less left.
             available = min((t for t in (bank, g.turn_s) if t is not None), default=None)
@@ -759,7 +804,8 @@ class Session:
                                 "left_s": None if available is None else round(available - took, 3),
                                 "bank_s": None if g.timer is None else round(g.timer.bank, 3),
                                 "bank_left_s": None if plan is None else round(bank, 3),
-                                "budget_s": None if budget is None else round(budget, 3), "mode": plan}
+                                "budget_s": None if budget is None else round(budget, 3), "mode": plan,
+                                "deep_s": None if deep is None else round(deep, 3)}
 
     def _decide(self, g: Game, msg: dict[str, Any], turn: int, clock: anytime.Clock,
                 available: float | None) -> dict[str, Any]:
@@ -1200,6 +1246,9 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--bank-reserve", type=float, default=anytime.BANK_RESERVE_S, metavar="SECONDS",
                     help="ranked (a chess clock): the bot never plans its bank below this; with no more room it plays "
                          f"on the 15 s floor (default {anytime.BANK_RESERVE_S:g})")
+    ap.add_argument("--bank-deep-turns", type=float, default=anytime.BANK_DEEP_TURNS, metavar="N",
+                    help="ranked (a chess clock): after its full search, the bot's deeper stages use at most 1/N of its "
+                         f"bank's room above the reserve per turn (default {anytime.BANK_DEEP_TURNS:g})")
     ap.add_argument("--engine", default=None, metavar="sim|game-pool:N|game-pool:auto",
                     help="the bot's engine: a simulator plugin (sim) or N headless copies of your own game (game-pool, sized to "
                          "this PC with auto). Default: sim when it is installed, else game-pool:auto")
@@ -1247,6 +1296,7 @@ def main(argv: list[str] | None = None) -> int:
                       settings=args.settings, think_until_lockin=args.think_until_lockin, think_cap=args.think_cap,
                       lock_cap=args.lock_cap, turn_timer=None if args.turn_timer is None else args.turn_timer == "on",
                       deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
+                      bank_reserve=args.bank_reserve, bank_deep_turns=args.bank_deep_turns,
                       engine_spec=args.engine)
     server = Server(session, args.port, args.host)
     print(f"human-play bot server: {session.label} (candidate set {bot.candidate_set}) on {args.host}:{server.port}; "
