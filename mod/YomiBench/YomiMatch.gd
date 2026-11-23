@@ -460,6 +460,13 @@ func _raw_option_like(node, data, options, errs):
 	saved.invert()
 	for s in saved:
 		s[0].select(s[1])
+	# Item 1's name is the item's icon: a null Object, which a recorded game stores as
+	# "[Object:null]" and _raw_decode reads as null.
+	for k in options:
+		if typeof(like) == TYPE_DICTIONARY and typeof(like.get(k)) == TYPE_DICTIONARY:
+			var nm = like[k].get("name")
+			if typeof(nm) == TYPE_OBJECT and (nm == null or str(nm) == "[Object:null]"):
+				like[k]["name"] = null
 	return like
 
 
