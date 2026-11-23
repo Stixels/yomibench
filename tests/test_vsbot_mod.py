@@ -177,7 +177,7 @@ def test_plain_words_on_the_panel():
     """Item 6: the renames (the untimed meaning of the think box changed with the cap)."""
     human = HUMAN.read_text()
     for new in ('"Bot uses your thinking time"', '"Turn timer (ranked clock)"', '"Bot style:"',
-                '"unpredictable (mixes its moves)"', '"strongest move only"', '"You vs %s (local)"'):
+                '"unpredictable (mixes its moves; recommended)"', '"strongest move only"', '"You vs %s (local)"'):
         assert new in human, new
     for old in ("Bot thinks until you lock in", "the game's online timer; ranked: on", "samples its strategy)\"",
                 "over this PC only", '"bot thought: %s"'):

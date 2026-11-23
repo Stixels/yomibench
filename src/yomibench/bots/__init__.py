@@ -101,6 +101,9 @@ class MatrixBot:
         # Human play's turn timer only (yomibench.anytime): called with each double-oracle round's best-so-far
         # (row, col, p1 value, lists, converged). None everywhere else. Not part of the search key: it observes.
         self.progress: Callable[..., None] | None = None
+        # Candidate set 7's di_fine_all children only for this many support candidates per seat, the most
+        # likely first (`make_bot`'s @di_fine_moves=K); None: every support candidate (the default).
+        self.di_fine_moves: int | None = None
         self.name = "matrix" if search == "full" else "matrix-do"
 
     def _key(self, seat: int | None = None) -> tuple:
@@ -108,6 +111,8 @@ class MatrixBot:
         deciding seat, so it is keyed by it."""
         key = ("search", self.mode, self.iterations, self.tolerance, self.oracle_start, self.refine_rounds,
                self.di_refine_moves, self.explore, id(self.value))
+        if getattr(self, "di_fine_moves", None) is not None:  # absent from the key at its default
+            key += (("di_fine_moves", self.di_fine_moves),)
         if self.policy is None:
             return key
         return key + (self.policy,) + ((("own", seat),) if self.policy.scope == "own" else ())
@@ -207,7 +212,8 @@ class MatrixBot:
                         explored["value_before"] = r.value
                 lens = (len(cands[0]), len(cands[1]))
                 added = expand_near_support(obs, engine, (full(r.row, 0), full(r.col, 1)), self.di_refine_moves,
-                                            extra, all_di=expand_all and rnd == 0, view=view)
+                                            extra, all_di=expand_all and rnd == 0, view=view,
+                                            fine_di_moves=getattr(self, "di_fine_moves", None))
                 if not added:
                     break
                 refined += added
@@ -342,6 +348,7 @@ class MatrixBot:
                 **({"value_forward": "batched"} if getattr(self.value, "batched_forward", False)
                    or self.value_forward == "batched" else {}),
                 **({"playout_cap": list(self.playout_cap)} if self.playout_cap else {}),
+                **({"di_fine_moves": self.di_fine_moves} if getattr(self, "di_fine_moves", None) is not None else {}),
                 **({"policy": self.policy.config()} if self.policy else {})}
 
     def choose(self, obs: Observation, seat: int, engine: Engine, rng: random.Random) -> int:
@@ -417,7 +424,12 @@ def _union_index(obs: Observation, engine: Engine, view: Any) -> tuple[list[int]
     return out[0], out[1]
 
 
-FACTOR_DEFAULTS = {"di": 0, "feint": False, "reverse": False, "extra_set": 0, "aim": 0, "di_fine": 0}
+FACTOR_DEFAULTS = {"di": 0, "feint": False, "reverse": False, "extra_set": 0, "aim": 0, "di_fine": 0,
+                   "xy": 0, "di_fine_all": 0}
+# Candidate set 7's fine path factors (the simulator's set-6 switches xy_fine, di_fine_all): asked only around support
+# candidates, never for exploration extras (their cost model is children per support candidate). An engine
+# without those switches on never offers them, so this changes nothing there.
+SUPPORT_ONLY_FACTORS = frozenset({"xy", "di_fine_all"})
 
 
 def _factor_values(factor: str, allowed: Any) -> list[Any]:
@@ -433,7 +445,7 @@ def _factor_values(factor: str, allowed: Any) -> list[Any]:
 
 def expand_near_support(obs: Observation, engine: Engine, strategies: tuple[list[float], list[float]],
                         di_moves: int | None = None, extra: tuple[set, set] = (set(), set()),
-                        all_di: bool = False, view: Any = None) -> int:
+                        all_di: bool = False, view: Any = None, fine_di_moves: int | None = None) -> int:
     """Candidate set 4's factor refinement: for every candidate in either seat's support, ask the
     engine for its neighbours, the same move with one factor (DI, feint, reverse, extra set)
     changed, unless already asked this decision. Returns how many candidates were added.
@@ -446,7 +458,8 @@ def expand_near_support(obs: Observation, engine: Engine, strategies: tuple[list
     that joins the support gets its own neighbours next round (combinations of factors).
 
     `extra` (self-play exploration) names off-support candidates per seat to expand too, with every
-    factor except DI unless `all_di` (the occasional expand-everything decision).
+    factor except DI unless `all_di` (the occasional expand-everything decision), and never candidate set 7's
+    support-only path factors (SUPPORT_ONLY_FACTORS).
 
     `strategies` and the additions are in `view`'s lists (see turn_candidates). What a view has
     asked for is its own; the engine's answers are shared (`expansions`: spec -> the candidate
@@ -466,6 +479,7 @@ def expand_near_support(obs: Observation, engine: Engine, strategies: tuple[list
     for seat, strategy in enumerate(strategies):
         ranked = sorted((i for i, p in enumerate(strategy) if p > 0), key=lambda i: (-strategy[i], i))
         di_ok = set(ranked if di_moves is None else ranked[:di_moves])
+        fine_di_ok = set(ranked if fine_di_moves is None else ranked[:fine_di_moves])
         for i, p in enumerate(strategy):
             c = cands[seat][i]
             if (p <= 0 and i not in extra[seat]) or not c.factors:
@@ -475,6 +489,10 @@ def expand_near_support(obs: Observation, engine: Engine, strategies: tuple[list
             asked.add((seat, base, tuple(sorted(values.items()))))
             for f, allowed in c.factors.items():
                 if f == "di" and i not in di_ok and not all_di:
+                    continue
+                if p <= 0 and f in SUPPORT_ONLY_FACTORS:
+                    continue
+                if f == "di_fine_all" and i not in fine_di_ok:
                     continue
                 for v in _factor_values(f, allowed):
                     nv = {**values, f: v}
@@ -833,14 +851,20 @@ def make_bot(spec: str) -> Bot:
     the model path, so it may hold colons. A `@value_forward=batched` suffix (matrix bots with a model;
     `--engine batch` only) scores this bot's two views in one value-net forward, as selfplay
     --batched-net-forward does: not bit-identical to the default, so it can be gated on one seat.
+    A `@di_fine_moves=K` suffix (matrix bots) asks candidate set 7's `di_fine_all` children only for each seat's K
+    most likely support candidates (`MatrixBot.di_fine_moves`; default: every support candidate).
     `policy:POLICY.npz` is the no-search bot (`PolicyBot`), sampling the policy net's softmax;
     `@temp=T` sets its temperature, and `@N` works as above."""
     if spec.startswith("policy:"):
         return _policy_bot(spec[len("policy:"):])
     spec, sep, rest = spec.partition("@")
-    cset, cheap, prune, forward = "", None, None, None
+    cset, cheap, prune, forward, fine_di = "", None, None, None, None
     for opt in rest.split("@") if sep else []:
-        if opt.startswith("prune="):
+        if opt.startswith("di_fine_moves="):
+            fine_di = int(opt[len("di_fine_moves="):])
+            if fine_di < 1:
+                raise ValueError(f"@di_fine_moves=K needs K >= 1: {opt!r}")
+        elif opt.startswith("prune="):
             parts = opt[len("prune="):].split(":", 3)
             if len(parts) < 4 or not parts[3]:
                 raise ValueError(f"@prune=K:R:A[:own|both]:POLICY.npz: {opt!r}")
@@ -891,6 +915,11 @@ def make_bot(spec: str) -> Bot:
             raise ValueError(f"only matrix bots with a model take @value_forward: {spec!r}")
         bot.value_forward = forward  # type: ignore[union-attr]
         bot.name = f"{bot.name}@value_forward={forward}"
+    if fine_di is not None:
+        if not isinstance(bot, MatrixBot):
+            raise ValueError(f"only matrix bots take @di_fine_moves: {spec!r}")
+        bot.di_fine_moves = fine_di
+        bot.name = f"{bot.name}@di_fine_moves={fine_di}"
     if prune:
         if not isinstance(bot, MatrixBot) or bot.mode != "oracle":
             raise ValueError(f"only matrix-do bots take @prune: {spec!r}")
