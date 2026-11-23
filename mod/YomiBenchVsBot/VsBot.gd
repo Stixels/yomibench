@@ -65,6 +65,12 @@ var last_phase = ""
 var listen_msec = 0
 var next_poll = 0
 var crashed = false     # the bot server went away after it was up (YomiHuman.bot_crashed shows it)
+var prep_thread = null  # the setup (launch: extracting the server, copying the game) runs here, not in a frame
+var prep_abort = false  # leaving during the setup: the thread stops at its next file
+var prep_msec = 0
+var prep_max_frame_ms = 0  # the longest frame during the setup (the log says it: the game kept drawing)
+var server_cmd = {}     # _server_command()'s answer from the setup (the hidden-desktop launcher reuses it)
+var log_lock = Mutex.new()  # _log runs on the setup thread too
 
 
 static func instance(tree):
@@ -118,12 +124,67 @@ func launch():
 	if not steam_owned(get_tree()):
 		_message("Multiplayer (vs bot) needs the game started through Steam, from your own copy.")
 		return false
+	# The panel first, then the slow part on a thread: the first time, extracting the bundled server (about 57 MB, each
+	# file's sha256 checked) and copying the game's files for the bot's copy. On the main thread that froze the game
+	# for seconds (a minute on a slow disk with antivirus scanning each new file), long enough for Windows to call it
+	# "Not responding" and offer to close it: a crash, to the player.
+	var sched = autoplay_schedule()
+	human = HUMAN.new()
+	human.name = "YomiHuman"
+	add_child(human)
+	human.connect("leave_requested", self, "leave")
+	human.connect("quitting", self, "_stop_children")
+	human.start(0, "127.0.0.1", sched != "", true, "host", self)
+	human.show_wait("YomiBench: setting up the bot...", "Getting the bot ready (the first time takes up to a minute)...")
+	waiting = true
+	prep_msec = OS.get_ticks_msec()
+	spawn_msec = prep_msec
+	prep_thread = Thread.new()
+	if prep_thread.start(self, "_prepare", null) != OK:
+		_log("couldn't start the setup thread; setting up on the main thread")
+		prep_thread = null
+		_start_session(_prepare(null))
+	return true
+
+
+# The setup thread: the server's command (extracting the bundled server on first use) and the bot copy's folder.
+# Files only (File, Directory, paths): nothing here touches the scene tree. Checks prep_abort between files.
+func _prepare(_unused):
 	var cmd = _server_command()
+	var dir = "" if cmd.empty() or prep_abort else _client_run_dir()
+	if prep_thread != null:
+		call_deferred("_on_prepared")
+	return {"cmd": cmd, "dir": dir}
+
+
+func _on_prepared():
+	if prep_thread == null:
+		return
+	var r = prep_thread.wait_to_finish()
+	prep_thread = null
+	_log("setup took %.1f s (longest frame meanwhile: %d ms)" % [(OS.get_ticks_msec() - prep_msec) / 1000.0, prep_max_frame_ms])
+	if not leaving and not failed:
+		_start_session(r)
+
+
+# Waits for the setup thread (asking it to stop at the next file): before this node goes, or the game quits.
+func _join_prep():
+	if prep_thread == null:
+		return
+	prep_abort = true
+	prep_thread.wait_to_finish()
+	prep_thread = null
+
+
+# After the setup: start the server and the bot's copy. A failure here shows on the panel (the menu is hidden).
+func _start_session(r):
+	var cmd = r.get("cmd", {})
+	server_cmd = cmd
 	if cmd.empty():
-		_message(("The YomiBench bot server isn't installed, or Windows Security removed it (Windows Security > " +
+		_fail(("The YomiBench bot server isn't installed, or Windows Security removed it (Windows Security > " +
 			"Virus & threat protection > Protection history: restore or allow yomibench-bot-server.exe). Install " +
-			"YomiBench or re-add the mod, or set \"server\" in %s.\n\n%s") % [ProjectSettings.globalize_path(CONFIG), _log_paths()])
-		return false
+			"YomiBench or re-add the mod, or set \"server\" in %s.") % ProjectSettings.globalize_path(CONFIG))
+		return
 	port = _free_port()
 	app_server = cmd.app
 	var args = cmd.args.duplicate()
@@ -139,31 +200,23 @@ func launch():
 	spawn_unix = OS.get_unix_time()
 	pid = _spawn(cmd.exe, args)
 	if pid <= 0:
-		_message(("Couldn't start the bot server (%s). Windows Security may have blocked it: check Windows Security > " +
-			"Virus & threat protection > Protection history.\n\n%s") % [cmd.exe, _log_paths()])
-		return false
+		_fail(("Couldn't start the bot server (%s). Windows Security may have blocked it: check Windows Security > " +
+			"Virus & threat protection > Protection history.") % cmd.exe)
+		return
 	spawn_msec = OS.get_ticks_msec()
-	waiting = true
-	var err = _host()
+	var err = _host(str(r.get("dir", "")))
 	if err != "":
 		_stop_children()
 		if get_tree().network_peer != null:
 			Network.stop_multiplayer()
-		_message("Couldn't start Multiplayer (vs bot): %s." % err)
-		return false
-	human = HUMAN.new()
-	human.name = "YomiHuman"
-	add_child(human)
-	human.connect("leave_requested", self, "leave")
-	human.connect("quitting", self, "_stop_children")
-	human.start(0, "127.0.0.1", sched != "", true, "host", self)
+		_fail("Couldn't start Multiplayer (vs bot): %s." % err)
+		return
 	Network.connect("multiplayer_stopped", self, "_on_multiplayer_stopped")
-	return true
 
 
 # The host's half of Network.host_game_direct, with the ENet socket bound to 127.0.0.1 (the game's own binds every
 # interface) and one peer at most; then the client copy is started to join it.
-func _host():
+func _host(dir):
 	var e = null
 	var enet_port = 0
 	for _i in range(20):
@@ -204,7 +257,6 @@ func _host():
 	get_tree().connect("network_peer_disconnected", self, "_on_peer_disconnected", [], CONNECT_DEFERRED)
 	randomize()
 	token = "%08x%08x" % [randi(), randi()]
-	var dir = _client_run_dir()
 	if dir == "":
 		return "couldn't prepare the bot's copy of the game"
 	var cfg = {"enet": enet_port, "life": life_port, "bot": port, "token": token,
@@ -221,7 +273,9 @@ func _host():
 	return ""
 
 
-func _process(_delta):
+func _process(delta):
+	if prep_thread != null:
+		prep_max_frame_ms = max(prep_max_frame_ms, int(delta * 1000))
 	if life == null:
 		return
 	if life_conn == null and life.is_connection_available():
@@ -375,7 +429,7 @@ func on_mp_hello(sender, tok):
 # priority, and writes its pid to a file. That launcher lives as long as the copy and ending it ends the copy.
 # Returns the launcher's pid (what _stop_children ends), or the copy's own if the fallback below was used.
 func _spawn_hidden(exe, args):
-	var cmd = _server_command()
+	var cmd = server_cmd
 	var pid_file = ProjectSettings.globalize_path(CLIENT_DIR).plus_file("client.pid")
 	Directory.new().remove(pid_file)
 	if not cmd.empty():
@@ -488,6 +542,7 @@ func _shutdown():
 	if leaving:
 		return
 	leaving = true
+	_join_prep()
 	_stop_children()
 	if enet != null and get_tree().network_peer == enet:
 		Network.stop_multiplayer()
@@ -500,8 +555,10 @@ func _shutdown():
 
 func _notification(what):
 	if what == MainLoop.NOTIFICATION_WM_QUIT_REQUEST:  # the window is closing; the engine is still up
+		_join_prep()
 		_stop_children()
-	elif what == NOTIFICATION_PREDELETE:  # teardown: no blocking calls here, just end the processes
+	elif what == NOTIFICATION_PREDELETE:  # teardown: just end the processes (and the setup thread, at its next file)
+		_join_prep()
 		_stop_children()
 
 
@@ -541,6 +598,8 @@ func _client_run_dir():
 		d.list_dir_end()
 	var f = File.new()
 	for n in names:
+		if prep_abort:
+			return ""
 		var a = src.plus_file(n)
 		var b = dest.plus_file(n)
 		if not f.file_exists(a):
@@ -651,6 +710,8 @@ func _bundled_server():
 	var t0 = OS.get_ticks_msec()
 	var d = Directory.new()
 	for e in man.files:
+		if prep_abort:
+			return ""
 		var target = dest.plus_file(e.path)
 		if f.file_exists(target) and f.get_sha256(target) == e.sha256:
 			continue
@@ -726,12 +787,14 @@ func _free_port():
 
 # One line per event in user://yomibench_vsbot.log (the game's stdout is buffered when redirected).
 func _log(text):
+	log_lock.lock()
 	var f = File.new()
 	var mode = File.READ_WRITE if f.file_exists("user://yomibench_vsbot.log") else File.WRITE
 	if f.open("user://yomibench_vsbot.log", mode) == OK:
 		f.seek_end()
 		f.store_line("%s %s" % [OS.get_datetime_from_unix_time(OS.get_unix_time()), text])
 		f.close()
+	log_lock.unlock()
 
 
 func _message(text):
