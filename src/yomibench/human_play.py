@@ -46,7 +46,11 @@ it thinks until the human locks in, then at most `lock_cap` more (or less if its
 left - reserve); with less room it plays on the floor, the per-turn deadline above (anytime.bank_budget). The
 production search may use that whole room; the optional deeper stages after it stop at the turn's share of the room,
 (bank left - reserve) / `bank_deep_turns` (anytime.bank_deep_s; 840 s of room: 8.4 s), since the game charges the
-bot's clock while it waits on the human. The bank is the game's own P2 clock as the mod reads it at the turn's open
+bot's clock while it waits on the human. The production search's factor refinement also stops at a share,
+(bank left - reserve) / `bank_refine_turns` (anytime.bank_refine_s; 840 s of room: 21 s), and plays its latest
+converged answer; its base double oracle keeps the whole room. With the after-lock cap (untimed or bank), once the
+human has locked in and the search has a converged answer, the bot answers `lock_converged` (1.5 s) later instead of
+the full cap. The bank is the game's own P2 clock as the mod reads it at the turn's open
 (`bot_clock_s` in the decision), else the bot's model of it. Each decision logs `bank_left_s`, `budget_s`, `deep_s` and
 `mode` (bank | floor) in its `clock`.
 
@@ -442,6 +446,8 @@ class Game:
         self.turn_s: float | None = None  # one turn of the match's turn timer: every answer's ceiling
         self.deadline_hits = 0  # decisions whose deadline cut the production search
         self.lock_cap_hits = 0  # untimed decisions whose after-lock cap cut the production search
+        self.lock_converged_hits = 0  # decisions answered LOCK_CONVERGED_S after the lock-in (refinement cut)
+        self.refine_share_hits = 0  # bank decisions whose refinement share cut refinement
         self.untimed_locked = 0  # untimed stoppable decisions the human locked in during (the cap could apply)
         self.paths: dict[str, int] = {}  # what produced each searched move (anytime.PATHS): count per path
         self.file = open(path, "w", encoding="utf-8", newline="\n")
@@ -471,6 +477,8 @@ class Session:
                  think_cap: float = anytime.THINK_CAP_S, lock_cap: float = anytime.LOCK_CAP_S,
                  bank_reserve: float = anytime.BANK_RESERVE_S,
                  bank_deep_turns: float = anytime.BANK_DEEP_TURNS,
+                 lock_converged: float = anytime.LOCK_CONVERGED_S,
+                 bank_refine_turns: float = anytime.BANK_REFINE_TURNS,
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
                  deadline_fraction: float = anytime.DEADLINE_FRACTION, log: Callable[[str], None] = print,
                  engine_spec: str | None = None, bot_factory: Callable[[str], Any] | None = None):
@@ -495,6 +503,12 @@ class Session:
         if not bank_deep_turns > 0:
             raise ValueError(f"bank deep turns must be > 0: {bank_deep_turns}")
         self.bank_deep_turns = float(bank_deep_turns)
+        if not lock_converged >= 0:
+            raise ValueError(f"the converged after-lock stop must be >= 0 s (0: off): {lock_converged}")
+        self.lock_converged = float(lock_converged)
+        if not bank_refine_turns >= 0:
+            raise ValueError(f"bank refine turns must be >= 0 (0: no refinement share): {bank_refine_turns}")
+        self.bank_refine_turns = float(bank_refine_turns)
         self.bot = (bot_factory or make_bot)(bot_spec)
         if getattr(self.bot, "playout_cap", None):  # human play always searches full turns
             raise ValueError(f"{bot_spec}: human play searches every turn in full; drop the @cheap option")
@@ -778,6 +792,10 @@ class Session:
             clock.emergency_at = clock.t0 + anytime.emergency_within(budget, budget)
             clock.lock_cap = self.lock_cap
             clock.cap_at = clock.t0 + min(budget, deep)
+            if self.bank_refine_turns > 0:
+                # The production search's refinement stops at this turn's share too (bank_refine_s), playing its
+                # latest converged answer; its base double oracle keeps the whole budget.
+                clock.refine_at = clock.t0 + anytime.bank_refine_s(bank, self.bank_reserve, self.bank_refine_turns)
         else:
             # The time this answer has: one turn of the match's turn timer, or less if a bank has less left.
             available = min((t for t in (bank, g.turn_s) if t is not None), default=None)
@@ -790,6 +808,8 @@ class Session:
             clock.cap_at = clock.t0 + self.think_cap
         if available is None:  # no turn timer: at most lock_cap seconds after the human locks in
             clock.lock_cap = self.lock_cap
+        if clock.lock_cap is not None and self.lock_converged > 0:
+            clock.lock_converged = self.lock_converged  # ...and lock_converged once a converged answer exists
         pending = g.pending
         try:
             return self._decide(g, msg, turn, clock, available)
@@ -895,6 +915,10 @@ class Session:
         notes: dict[str, Any] = {"path": out.path, "stopped": out.stopped, "fallback": fallback, "trace": out.trace,
                                  "work": work,
                                  "lock_in_ms": lock_ms, "deep": deep,
+                                 "converged_ms": None if clock.converged_at is None
+                                 else round((clock.converged_at - clock.t0) * 1000, 1),
+                                 "lock_converged_s": clock.lock_converged,
+                                 "refine_s": None if clock.refine_at is None else round(clock.refine_at - clock.t0, 3),
                                  "deadline_s": None if clock.hard_at is None else round(clock.hard_at - clock.t0, 3),
                                  "lock_cap_s": clock.lock_cap,
                                  "timer_available_s": None if available is None else round(available, 3),
@@ -907,6 +931,10 @@ class Session:
             notes["lock_cut"] = True
             self.log(f"game {g.id}: turn {obs.turn}: the {clock.lock_cap:g} s after-lock cap cut the full search; "
                      f"played {played.get(out.path, 'Continue')}")
+        elif out.production is None and out.stopped == "lock-converged":
+            g.lock_converged_hits += 1  # answered soon after the lock-in with the converged answer: refinement cut
+        elif out.production is None and out.stopped == "refine-share":
+            g.refine_share_hits += 1  # the bank's refinement share cut refinement: the converged answer played
         elif out.production is None and out.stopped in ("deadline", "emergency"):
             g.deadline_hits += 1
             self.log(f"game {g.id}: turn {obs.turn}: the deadline ({notes['deadline_s']} s) cut the full search; "
@@ -1006,6 +1034,7 @@ class Session:
             "p2_overrides": g.p2_overrides, "p2_fallbacks": g.p2_fallbacks, "reason": reason,
             "deadline_hits": g.deadline_hits, "paths": dict(g.paths), "forfeit": forfeit,
             "lock_cap_hits": g.lock_cap_hits, "untimed_locked": g.untimed_locked,
+            "lock_converged_hits": g.lock_converged_hits, "refine_share_hits": g.refine_share_hits,
             "think_ms_mean": _round(sum(g.think_ms) / len(g.think_ms), 1) if g.think_ms else None,
             "think_ms_max": _round(max(g.think_ms), 1) if g.think_ms else None,
             "seconds": round(time.time() - g.t0, 1),
@@ -1031,7 +1060,7 @@ class Session:
                    "matchups": [matchup], "ratings": None,
                    **{k: s[k] for k in ("result", "valid", "turns", "desync", "desync_turns", "characters", "seed",
                                         "final_tick", "final_hp", "p2_overrides", "p2_fallbacks", "deadline_hits",
-                                        "lock_cap_hits", "forfeit",
+                                        "lock_cap_hits", "lock_converged_hits", "refine_share_hits", "forfeit",
                                         "think_ms_mean", "think_ms_max", "seconds")},
                    "bot_seat": "p2", "candidate_set": self.candidate_set,
                    "candidate_rules": self.hello.get("candidate_rules"), "sim_winner": s["sim_winner"]}
@@ -1249,6 +1278,13 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--bank-deep-turns", type=float, default=anytime.BANK_DEEP_TURNS, metavar="N",
                     help="ranked (a chess clock): after its full search, the bot's deeper stages use at most 1/N of its "
                          f"bank's room above the reserve per turn (default {anytime.BANK_DEEP_TURNS:g})")
+    ap.add_argument("--lock-converged", type=float, default=anytime.LOCK_CONVERGED_S, metavar="SECONDS",
+                    help="once you lock in and the bot's search has a converged answer, it answers within this many "
+                         f"seconds instead of the full --lock-cap (default {anytime.LOCK_CONVERGED_S:g}; 0: off)")
+    ap.add_argument("--bank-refine-turns", type=float, default=anytime.BANK_REFINE_TURNS, metavar="N",
+                    help="ranked (a chess clock): the full search's refinement stops at 1/N of the bank's room above "
+                         "the reserve per turn and plays its converged answer; its base search keeps the whole room "
+                         f"(default {anytime.BANK_REFINE_TURNS:g}; 0: off)")
     ap.add_argument("--engine", default=None, metavar="sim|game-pool:N|game-pool:auto",
                     help="the bot's engine: a simulator plugin (sim) or N headless copies of your own game (game-pool, sized to "
                          "this PC with auto). Default: sim when it is installed, else game-pool:auto")
@@ -1297,6 +1333,7 @@ def main(argv: list[str] | None = None) -> int:
                       lock_cap=args.lock_cap, turn_timer=None if args.turn_timer is None else args.turn_timer == "on",
                       deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
                       bank_reserve=args.bank_reserve, bank_deep_turns=args.bank_deep_turns,
+                      lock_converged=args.lock_converged, bank_refine_turns=args.bank_refine_turns,
                       engine_spec=args.engine)
     server = Server(session, args.port, args.host)
     print(f"human-play bot server: {session.label} (candidate set {bot.candidate_set}) on {args.host}:{server.port}; "
