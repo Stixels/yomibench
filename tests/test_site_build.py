@@ -1,6 +1,7 @@
-"""site/build.py: every route is built at its own pretty URL with working relative links, the one-file preview holds
-every route under its hash, the ratings put the stronger side ahead, and the hero is the longest game between the
-top two."""
+"""site/build.py: every route is built at its own pretty URL with working relative links (moved pages redirect), the
+one-file preview holds every route under its hash, the ratings put the stronger side ahead with each rating inside its
+interval, the hero is the longest game between the top two, and History, the record book and Replays are built from
+the releases."""
 import importlib.util
 import json
 import re
@@ -59,10 +60,13 @@ def read(out, route):
 def test_every_route_has_its_own_url_and_links_resolve(tmp_path):
     rels = [rel(2, 1, 0.7, 200, ("standard", 4)), rel(3, 2, 0.6, 200), rel(4, 3, 0.55, 240)]
     out = site(tmp_path, rels)
-    for route in ("/", "/bots/g4/", "/bots/g1/", "/lab/", "/lab/showcase/", "/lab/showcase/g2/", "/lab/generations/",
-                  "/lab/training/", "/get-started/", "/get-started/setup/", "/submit/"):
+    moved = {"/lab/showcase/": "/bots/g4/", "/lab/showcase/g2/": "/bots/g2/", "/lab/generations/": "/history/",
+             "/arena/": "/"}
+    for route in ("/", "/bots/g4/", "/bots/g1/", "/history/", "/history/records/", "/replays/", "/lab/",
+                  "/lab/training/", "/get-started/", "/get-started/setup/", "/submit/", *moved):
         page = read(out, route)
-        assert f'<link rel="canonical" href="https://example.org/yomibench{route}">' in page, route
+        canonical = moved.get(route, route)
+        assert f'<link rel="canonical" href="https://example.org/yomibench{canonical}">' in page, route
         for href in re.findall(r'(?:href|src)="([^"#:]+)"', page):  # every relative link points at a real file
             target = (out / route.strip("/") / href).resolve()
             assert target.exists() or (target / "index.html").exists(), (route, href)
@@ -76,14 +80,14 @@ def test_the_arena_lab_and_bot_pages(tmp_path):
     home = read(out, "/")
     assert "The Arena" in home and 'class="board"' in home and 'aria-current=page' in home
     assert home.index("bots/g4/") < home.index("bots/g1/")  # strongest first
-    gens = read(out, "/lab/generations/")
-    assert "Earlier era: standard settings · set 4" in gens and "rating anchor" in gens
+    assert "Earlier era: standard settings · set 4" in home
+    history = read(out, "/history/")
+    assert "rating anchor" in history and "The climb" in history and "Candidate set 6" in history
     bot = read(out, "/bots/g4/")
     assert "Results by opponent" in bot and "Record by matchup" in bot and "gen-4-a.mp4" in bot
     assert "As the opponent" in read(out, "/bots/g3/")
-    lab = read(out, "/lab/")
-    assert "The training story" in lab and sb.CREDITS in lab and "Candidate set 6" in lab
-    assert "g4 <span" in read(out, "/lab/showcase/") and "HustleBot g4" in read(out, "/lab/showcase/")
+    assert sb.CREDITS in read(out, "/lab/")
+    assert "g4 in action" in bot and "url=../../bots/g4/" in read(out, "/lab/showcase/")
     assert "train_loop.py" in read(out, "/get-started/") and "lab/training/" in read(out, "/get-started/setup/")
     assert all(sb.FOOT_CREDITS in p.read_text(encoding="utf-8") for p in out.rglob("*.html") if p.parent.name != "arena")
     point, ci = sb.ratings(rels)
@@ -95,8 +99,10 @@ def test_the_one_file_preview_holds_every_route_under_its_hash(tmp_path):
     out = site(tmp_path, [rel(2, 1, 0.7, 200), rel(3, 2, 0.6, 200)], spa=True)
     page = (tmp_path / "spa" / "index.html").read_text(encoding="utf-8")
     names = set(re.findall(r'<template data-route="([^"]+)"', page))
-    assert {"arena", "bots-g3", "lab", "lab-showcase", "lab-showcase-g2", "get-started", "submit", "not-found"} <= names
-    assert 'href="#lab-showcase-g2"' in page and "@@" not in page and 'src="media/gen-3-a.mp4"' in page
+    assert {"arena", "history", "history-records", "replays", "bots-g3", "lab", "lab-showcase", "lab-showcase-g2",
+            "get-started", "submit", "not-found"} <= names
+    assert 'data-route="lab-showcase-g2" data-redirect="bots-g2"' in page
+    assert 'href="#bots-g2"' in page and "@@" not in page and 'href="media/gen-3-a.mp4"' in page
     assert "hashchange" in page and (tmp_path / "spa" / "style.css").exists() and out.exists()
 
 
@@ -175,3 +181,32 @@ def test_submissions_are_paused(tmp_path):
         text = page.read_text(encoding="utf-8")
         assert "issues/new" not in text and "submit-bot" not in text, page
         assert not re.search(r'<a [^>]*href="[^"]*submit/"', text), page  # its own canonical link isn't a link to it
+
+
+def test_every_rating_sits_inside_its_interval():
+    """A long chain of promotion tests converges slowly: the point fit and every bootstrap refit run to convergence,
+    so no rating lands outside its own 95% interval (the old fixed-iteration fit put the newest generations above it)."""
+    rels = [rel(n, n - 1, 0.6, 400) for n in range(2, 18)]
+    point, ci = sb.ratings(rels)
+    assert all(ci[b][0] <= point[b] <= ci[b][1] for b in point)
+    assert point["gen-17"] > point["gen-10"] > point["gen-2"] == 0
+
+
+def test_history_records_and_replays(tmp_path):
+    v = [vid(3, 2, "long", 300), vid(3, 2, "quick", 40)]
+    v[1].update(slot="biggest win", why="Cowboy mirror, biggest win: +1500 hp")
+    v.append({**vid(3, 2, "back", 150), "slot": "comeback", "why": "Cowboy mirror, best comeback: from -1230 hp"})
+    v.append({**vid(3, 2, "cast", 80), "group": "cast", "matchup": "Wizard vs Cowboy", "new_side": "right, P2"})
+    rels = [rel(2, 1, 0.7, 200), rel(3, 2, 0.55, 800, videos=v)]
+    out = site(tmp_path, rels)
+    records = read(out, "/history/records/")
+    for text in ("Longest game", "300 turns", "Quickest knockout", "40 turns", "Biggest comeback", "−1,230 hp",
+                 "Closest promotion", "55.0%", "Most decisive promotion", "70%", "Biggest promotion test", "800 games"):
+        assert text in records, text
+    replays = read(out, "/replays/")
+    assert replays.count('class="rcard') == 5 and 'data-mu="Cowboy vs Wizard"' in replays  # its own character first
+    assert 'data-slot="comeback"' in replays and 'name="gen"' in replays and "From −1,230 hp" in replays
+    history = read(out, "/history/")
+    assert history.count('class="tl-item') == 2 and 'class="chart"' in history and "bots/g3/" in history
+    bot = read(out, "/bots/g3/")
+    assert 'class="hm"' in bot and "Cowboy vs the cast" in bot and "played P2, right" in bot
