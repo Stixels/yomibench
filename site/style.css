@@ -97,7 +97,7 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 .mainnav::-webkit-scrollbar { display: none; }
 .mainnav a { flex: none; padding: 7px 13px; border-radius: 999px; font-size: var(--fs-sm); font-weight: 500; color: var(--muted); text-decoration: none; }
 .mainnav a:hover { color: var(--ink); background: var(--panel-2); }
-.mainnav a.on { color: var(--ink); background: var(--panel-3); box-shadow: inset 0 -2px 0 var(--accent); }
+.mainnav a.on { color: var(--ink); font-weight: 600; background: var(--panel-3); box-shadow: inset 0 0 0 1px var(--line-2); }
 .actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
 .actions .cta.on { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 2px; }
 .themebtn, .gh { flex: none; display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 999px; color: var(--muted);

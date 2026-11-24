@@ -10,7 +10,7 @@ them; `arena` holds the Arena's data (settings.json, bots.json, results/*.jsonl;
 Routes (pretty URLs: each is a folder with an index.html; links between pages are relative, so the site works under
 any base path; --site-url adds canonical links and the 404 page's base):
 
-    /                       the Arena: the reigning champion, the ladder, the champion's matchup chart, recent results
+    /                       the Arena (not open yet): the current best HustleBot, the house ladder, its matchup chart
     /history/               the climb: rating and promotion margin by generation, and every generation in order
     /history/records/       the record book: longest game, quickest knockout, biggest comeback, closest promotion...
     /replays/               every published replay, filterable by generation, matchup, moment and result
@@ -733,8 +733,11 @@ def rating_chart(gens, point, ci, era_of, champ, w, h, compact) -> str:
     half = (w - pl - pr) / max(1, len(gens) - 1) / 2
     for k, (a, b, e) in enumerate(eras):
         x0, x1 = max(pl - 6, xs[a] - half), min(w - pr + 6, xs[b] + half)
+        room = x1 - x0 - 8
         name = "early" if e is None else (f'set {e.get("candidate_set")}' if compact else era_short(e))
-        fits = len(name) * (6.4 if compact else 6.8) < x1 - x0 - 8
+        if e is not None and len(name) * 6.8 >= room:  # a short era: just its set
+            name = f'set {e.get("candidate_set")}'
+        fits = len(name) * (6.4 if compact else 6.8) < room
         out.append(f'<rect x="{x0:.1f}" y="{pt - 22}" width="{x1 - x0:.1f}" height="{h - pt - pb + 22}" '
                    f'class="band{k % 2}{" now" if k == len(eras) - 1 else ""}"/>'
                    + (f'<text x="{x0 + 7:.1f}" y="{pt - 8}" class="eralbl">{esc(name)}</text>' if fits else ""))
@@ -1304,7 +1307,7 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
                           f'{g.get("games")}</span></td><td class="num hide-s">{kcount(r.get("games_trained"))}</td></tr>')
     body = (subnav(HISTORY_NAV, "/history/", "History")
             + f'<header class="pagehead"><p class="eyebrow">History</p><h1>The climb</h1><p class="lead">Every '
-            f'HustleBot generation learned from its own games and had to pass a head-to-head test against the champion '
+            f'HustleBot generation learned from its own games and had to pass a head-to-head test against the best generation '
             f'before it. This is that ladder, one promotion at a time.</p></header>{stats}'
             f'<section><div class="sechead"><div><h2>Rating by generation</h2></div><span class="small">by generation · 95% band · '
             f'g{rels[0]["generation"] if rels else "?"} = 0 · eras shaded</span></div>'
