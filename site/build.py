@@ -869,10 +869,10 @@ def record_book(rels, vids, point) -> dict[str, list[dict]]:
     if gaps:
         s, a, b = min(gaps, key=lambda x: x[0])
         training.append({"title": "Fastest promotion", "value": span_text(s), "holder": house(b["generation"]),
-                         "detail": f"after g{a['generation']} took the title"})
+                         "detail": f"after g{a['generation']} was promoted"})
         s, a, b = max(gaps, key=lambda x: x[0])
         training.append({"title": "Longest reign", "value": span_text(s), "holder": house(a["generation"]),
-                         "detail": f"champion until g{b['generation']} beat it"})
+                         "detail": f"the best until g{b['generation']} replaced it"})
     return {"On camera": fights, "Promotions": promos, "Training": training}
 
 
@@ -940,11 +940,11 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
         cr = by_gen.get(champ)
         if cr:
             g = cr["gate"]["pooled"]
-            facts = [tile(f"{point[champ]:.0f}", "Rating", ci_text(champ, ci, base_bot)),
+            facts = [tile(f"{point[champ]:.0f}", "Rating", "from promotion tests"),
                      tile(pct(g.get("score")), "Promotion test",
                           f'vs g{cr.get("opponent_generation")} · {g.get("games")} games'),
                      tile(kcount(cr.get("games_trained")), "Self-play games", "in its training window"),
-                     tile(esc(mday(cr.get("promoted_utc"))), "Champion since", esc(str(when(cr.get("promoted_utc")).year))
+                     tile(esc(mday(cr.get("promoted_utc"))), "Best since", esc(str(when(cr.get("promoted_utc")).year))
                           if when(cr.get("promoted_utc")) else "")]
             lead = (f'Promoted {esc(day(cr.get("promoted_utc")))} after scoring {pct(g.get("score"))} against '
                     f'{esc(label(house(cr["opponent_generation"])))} over {g.get("games")} games. It learned by '
@@ -974,7 +974,7 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
                    f'</p><div class="chips">{"".join(f"<span class=chip>{esc(x)}</span>" for x in chips)}</div>'
                    f'</figcaption></figure>')
         hero = (f'<section class="hero{"" if vid else " novid"}"><div class="herotext"><p class="kicker">{CROWN}'
-                f'Reigning champion</p><h2 class="champname"><a href="{L(bot_route(champ))}">'
+                f'Current best HustleBot</p><h2 class="champname"><a href="{L(bot_route(champ))}">'
                 + (f'HustleBot <span>g{gen_of(champ)}</span>' if is_house(champ) else esc(champ))
                 + f'</a></h2><p class="lead">{lead}</p><div class="tiles hero-tiles">{"".join(facts)}</div>'
                 f'<div class="btns">{"".join(btns)}</div></div>{vid}</section>')
@@ -1014,10 +1014,6 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
     ladder_tabs = ('<div class="seg" role="group" aria-label="Which bots"><input type="radio" name="lad" id="lad-now" '
                    'checked><label for="lad-now">This era</label><input type="radio" name="lad" id="lad-all">'
                    '<label for="lad-all">All time</label></div>') if multi_era else ""
-    seat = (f'<a class="openseat" href="{L("/get-started/")}"><span class="gb ghost" aria-hidden="true">+</span>'
-            f'<span><b>Open seat: your bot here</b><span class="small">Every contender so far is a HustleBot generation. '
-            f'The Arena opens to outside bots with two divisions, model alone and full bot. Train one now on your own '
-            f'PC.</span></span><span class="go">Train a bot →</span></a>')
     base_line = ""
     bl = baselines(rels)
     if bl:
@@ -1025,38 +1021,32 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
             f'<span><b>{esc(name)}</b>: scored {pct(1 - sum(s * n for _, s, n in xs) / sum(n for _, _, n in xs))} '
             f'in {sum(n for _, _, n in xs)} games against '
             + ", ".join(f"g{g}" for g, _, _ in xs) + "</span>" for name, xs in bl.items()) + "</p>"
-    pooled = ("The overall rating counts all 25 character pairings equally, each played from both seats; ratings "
-              "by character are below.")
     if arena_only:
-        board_title = "The ladder"
-        note = f"Rated on the Arena's own ranked games, all under the spec below. {pooled}"
+        board_eyebrow, board_title = "Leaderboard", "The ladder"
+        board_lead = "Rated on the Arena's own ranked games."
+        note = "Every rating comes from the Arena's own ranked games."
+        era_start = ERA_STARTS.get(spec_hash(aspec)) if aspec else None
+        if era_start:
+            note += (f" A new rating era started with spec {spec_hash(aspec)} on {era_start[0]}; earlier results stay "
+                     f"under the old spec {era_start[1]}.")
     else:
-        board_title = "The ladder"
-        note = ("Until the Arena's own ranked matches are in, the ladder is HustleBot's history, and provisional: "
-                "each generation rated from the promotion test that published it, in the settings of its era. "
-                f"{gate_history(rels)} Compare ratings within an era. {pooled}")
-    era_start = ERA_STARTS.get(spec_hash(aspec)) if aspec else None
-    if era_start:
-        note += (f" A new rating era started with spec {spec_hash(aspec)} on {era_start[0]}; earlier provisional "
-                 f"results stay under the old spec {era_start[1]}.")
-    spec_line = ""
-    if aspec:
-        arena_games = sum(r.get("games") or 0 for r in rows)
-        spec_line = (f'<p class="specline"><span>game {esc(aspec["game"]["version"])} (Steam build '
-                     f'{esc(aspec["game"]["steam_build_id"])})</span><span>harness {esc(aspec["harness"]["version"])}'
-                     f'</span><span>candidate set {aspec["candidate_set"]}</span><span>spec <code>'
-                     f'{spec_hash(aspec)}</code></span><span>{arena_games} Arena games</span></p>')
-    ladder = (f'<section class="ladder" id="ladder"><div class="sechead"><div><p class="eyebrow">Leaderboard</p><h2>'
-              f'{board_title}</h2></div>{ladder_tabs}</div>'
+        board_eyebrow, board_title = "House ladder", "HustleBot generations"
+        board_lead = ("Rated from HustleBot's own promotion tests, which weight the characters the way training does "
+                      "(mostly Cowboy). These are not Arena ratings: how Arena matches will be weighted is still being "
+                      "decided.")
+        note = ("Each generation is rated from the promotion test that published it, in the settings of its era. "
+                f"{gate_history(rels)} Compare ratings within an era.")
+    ladder = (f'<section class="ladder" id="ladder"><div class="sechead"><div><p class="eyebrow">{board_eyebrow}</p>'
+              f'<h2>{board_title}</h2></div>{ladder_tabs}</div><p class="small note">{esc(board_lead)}</p>'
               f'<div class="tablewrap"><table class="board"><thead><tr><th class="rank">#</th>'
               f'<th>Bot</th><th class="num">Rating</th><th class="cicol"><span class="sr">95% interval</span></th>'
               f'<th class="num hide-s" title="Rating gained over the generation it beat">Gain</th>'
-              f'<th class="num hide-s">Games</th></tr></thead><tbody>{"".join(trs)}</tbody></table></div>{seat}'
+              f'<th class="num hide-s">Games</th></tr></thead><tbody>{"".join(trs)}</tbody></table></div>'
               f'{base_line}<details class="explain"><summary>How the ratings work</summary><div><p>Bradley–Terry '
               f'ratings on an Elo-like scale, with g{rels[0]["generation"] if rels else "?"} (the first published '
               f'generation) at 0 and a 95% interval from a bootstrap. Gain is the rating a generation added over the one '
               f'it beat. {esc(note)}</p><p>Rated games run on our private simulator of the game, checked against the '
-              f'real game; every video on this site is the game replayed in the real game.</p>{spec_line}</div>'
+              f'real game; every video on this site is the game replayed in the real game.</p></div>'
               f'</details></section>')
 
     # the champion's matchup chart, and ratings by character
@@ -1114,7 +1104,8 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
         t[0] += s * row["games"]
         t[1] += int(row["games"])
         t[2] = max(t[2], row.get("utc") or "")
-    feed += [(u, "Arena", a, b, w / n, n) for (a, b), (w, n, u) in pairs.items() if n]
+    if arena_only:  # the Arena's own matches count once it rates on them; earlier test runs stay off the home page
+        feed += [(u, "Arena", a, b, w / n, n) for (a, b), (w, n, u) in pairs.items() if n]
     feed = [(u, k, a, b, s, n) if s >= 0.5 else (u, k, b, a, 1 - s, n) for u, k, a, b, s, n in feed]  # winner first
     feed.sort(key=lambda x: x[0], reverse=True)
     feed_html = "".join(
@@ -1124,7 +1115,7 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
         f'<a href="{L(bot_route(b))}" class="{"w" if s < 0.5 else ""}">{esc(short(b))}</a></span>'
         f'<span class="split" aria-hidden="true"><i style="width:{100 * s:.0f}%"></i></span>'
         f'<span class="n">{n:,} games</span></li>' for u, k, a, b, s, n in feed[:6])
-    recent = (f'<div class="panelbox"><div class="sechead"><div><p class="eyebrow">Results</p><h2>Recent matches</h2>'
+    recent = (f'<div class="panelbox"><div class="sechead"><div><p class="eyebrow">Results</p><h2>Recent promotions</h2>'
               f'</div><a class="more" href="{L("/history/")}">Full history →</a></div><ol class="feed">{feed_html}</ol>'
               f'</div>') if feed_html else ""
     champ_vids = [v for v in vids if v["bots"][0] == champ and v.get("group") == "featured"]
@@ -1140,12 +1131,18 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
                 (str(len(rels)), "generations promoted"), (big_count(total_trained), "self-play games trained on"),
                 (f"{total_test:,}", "promotion-test games"), (str(len(vids)), "replays in the real game"),
                 (str(len(CHARACTERS)), "characters"))) + "</div>")
+    status = ("" if arena_only else
+              '<div class="status"><span class="pill closed">Submissions closed</span><span class="pill">Rating format '
+              'being decided</span></div>')
+    intro = ("Bots play <i>Your Only Move Is HUSTLE</i> head to head, rated on the Arena's own ranked matches."
+             if arena_only else
+             "A bot arena for <i>Your Only Move Is HUSTLE</i>. It isn't open yet: submissions are closed while we decide "
+             "how Arena matches are weighted and rated. Until then, this page follows HustleBot, the house bot, as it "
+             "trains.")
     body = (f'<header class="pagehead arenahead"><p class="eyebrow">Your Only Move Is HUSTLE · bot arena</p>'
-            f'<h1>The Arena</h1><p class="lead">Bots play <i>Your Only Move Is HUSTLE</i> under one fixed rule set, with '
-            f'the same thinking budget for every move. Right now every contender is a generation of HustleBot, the '
-            f'house bot, each one promoted after a head-to-head test against the champion before it.</p></header>'
-            f'{hero}{strip}{ladder}<div class="twocol">{matchup_sec}<div class="stack">{recent}{by_character}</div></div>'
-            f'{latest}'
+            f'<h1>The Arena</h1><p class="lead">{intro}</p>{status}</header>'
+            f'{hero}{strip}{ladder}<div class="twocol">{matchup_sec}<div class="stack">{recent}'
+            f'{by_character if arena_only else ""}</div></div>{latest}'
             f'<section class="cards three cta"><a class="card" href="{L("/get-started/")}">{ICONS["bolt"]}'
             f'<b>Train your own</b><span>One PC and your copy of the game: self-play, training and promotion in one '
             f'command.</span></a>'
@@ -1213,7 +1210,7 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
                     + "</nav>")
         tags = []
         if b == champ:
-            tags.append(f'<span class="tag champ">{CROWN}Champion</span>')
+            tags.append(f'<span class="tag champ">{CROWN}Current best</span>')
         if r:
             tags.append(f'<span class="tag">{esc(era_short(r["era"]))}</span>')
         hm = heatmap(r, f"{short(b)} against g{r['opponent_generation']} by character pairing") \
@@ -1286,7 +1283,7 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
             f'<li class="tl-item{" champ" if hb == champ else ""}"><a class="tl-card" href="{L(bot_route(hb))}">'
             + (f'<img src="{M(pv)}" alt="" loading="lazy">' if pv else '<span class="noposter"></span>')
             + f'<div class="tl-body"><div class="tl-top">{badge(hb, e == cur_era, hb == champ)}<b>HustleBot '
-            f'g{r["generation"]}</b>{f"<span class=tag>{CROWN}Champion</span>" if hb == champ else ""}'
+            f'g{r["generation"]}</b>{f"<span class=tag>{CROWN}Current best</span>" if hb == champ else ""}'
             f'<span class="when">{esc(day(r.get("promoted_utc")))}</span></div>'
             f'<p class="tl-res">{"Beat" if (g.get("score") or 0) > 0.5 else "Promoted against"} g{r.get("opponent_generation")} '
             f'<b>{pct(g.get("score"))}</b> over '
@@ -1703,7 +1700,7 @@ SPA_SCRIPT = """<script>
   function show() {
     var name = decodeURIComponent(location.hash.slice(1)) || "arena";
     var t = routes[name] || routes["not-found"];
-    if (t.dataset.redirect) { location.replace("#" + t.dataset.redirect); return; }
+    if (t.dataset.redirect && t.dataset.redirect !== name) { location.replace("#" + t.dataset.redirect); return; }
     view.replaceChildren(t.content.cloneNode(true));
     if (window.yomiInit) { yomiInit(); }
     document.title = t.dataset.title + " · yomibench";
@@ -1728,10 +1725,12 @@ def write_spa(spa: Path, routes, notfound: str, title: str = "yomibench", head: 
     shutil.copyfile(HERE / "style.css", spa.parent / "style.css")
     tpl = "".join(f'<template data-route="{hash_of(p)}" data-title="{esc(t)}" data-section="{s}">{b}</template>'
                   for p, (t, s, b) in routes.items())
+    # a redirect whose hash names a page already (/arena/ and / are both #arena) would replace that page: skip it
     tpl += "".join(f'<template data-route="{hash_of(p)}" data-redirect="{hash_of(t)}" data-title="" data-section="">'
-                   f'</template>' for p, t in (redirects or {}).items())
+                   f'</template>' for p, t in (redirects or {}).items()
+                   if hash_of(p) not in {hash_of(r) for r in routes} and hash_of(p) != hash_of(t))
     tpl += f'<template data-route="not-found" data-title="Page not found" data-section="">{notfound}</template>'
-    page = (f'<title>{esc(title)}</title>\n{head}\n<meta name="color-scheme" content="light dark">'
+    page = (f'<meta charset="utf-8"><title>{esc(title)}</title>\n{head}\n<meta name="color-scheme" content="light dark">'
             f'<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="{FONTS}">'
             f'<link rel="stylesheet" href="style.css">{THEME_EARLY}\n'
             + header_html("arena") + '<main id="main" class="wrap"></main>' + FOOTER

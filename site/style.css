@@ -584,3 +584,6 @@ details[open] .tog .h { display: inline; }
   .card:hover, .tl-card:hover { transform: none; }
 }
 .stack { display: flex; flex-direction: column; gap: var(--s5); min-width: 0; }
+.status { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill { font: 500 var(--fs-xs) var(--mono); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--ink-2); background: var(--panel); }
+.pill.closed { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 45%, var(--line)); background: var(--loss-soft); }

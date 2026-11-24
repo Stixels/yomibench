@@ -98,7 +98,10 @@ def test_the_arena_lab_and_bot_pages(tmp_path):
 def test_the_one_file_preview_holds_every_route_under_its_hash(tmp_path):
     out = site(tmp_path, [rel(2, 1, 0.7, 200), rel(3, 2, 0.6, 200)], spa=True)
     page = (tmp_path / "spa" / "index.html").read_text(encoding="utf-8")
-    names = set(re.findall(r'<template data-route="([^"]+)"', page))
+    found = re.findall(r'<template data-route="([^"]+)"', page)
+    assert len(found) == len(set(found))  # one template per hash: a duplicate would replace the page (#arena)
+    assert page.startswith('<meta charset="utf-8">') and "<h1>The Arena</h1>" in page
+    names = set(found)
     assert {"arena", "history", "history-records", "replays", "bots-g3", "lab", "lab-showcase", "lab-showcase-g2",
             "get-started", "submit", "not-found"} <= names
     assert 'data-route="lab-showcase-g2" data-redirect="bots-g2"' in page
@@ -148,9 +151,10 @@ def test_ratings_by_character_use_arena_games_and_only_cowboy_gates(tmp_path):
     point = {"gen-2": 0.0, "gen-3": 100.0}
     rt = sb.character_ratings(res["Cowboy"], point)
     assert rt["gen-3"][4] is True and rt["gen-3"][1] < rt["gen-3"][0] < rt["gen-3"][2]  # provisional, with interval
-    home = read(site(tmp_path, rels), "/")
-    assert "Rating by character" in home and 'id="ct-Robot"' in home and "provisional" in home
-    assert "all 25 character pairings equally" in home
+    out = site(tmp_path, rels)
+    bot = read(out, "/bots/g3/")
+    assert "Rating by character" in bot and "as Cowboy" in bot and "provisional" in bot
+    assert "Rating by character" not in read(out, "/")  # the Arena's format isn't settled: not on the home page
 
 
 def test_the_newest_two_generations_have_no_public_weights(tmp_path):
@@ -161,14 +165,17 @@ def test_the_newest_two_generations_have_no_public_weights(tmp_path):
     assert read(out, "/").count("house bot, weights not public") == 2
 
 
-def test_a_new_spec_says_its_rating_era_started(tmp_path):
+def test_a_new_spec_says_its_rating_era_started():
     spec = json.loads((ROOT / "arena" / "spec.json").read_text(encoding="utf-8"))
     assert sb.spec_hash(spec) in sb.ERA_STARTS  # repinning arena/spec.json means saying when its era started
-    (tmp_path / "arena").mkdir()
-    (tmp_path / "arena" / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+
+
+def test_the_arena_is_not_open_yet(tmp_path):
+    """Until the Arena rates on its own games, the home page says submissions are closed and the format undecided,
+    labels the ladder as promotion-test ratings, and offers no seat to enter."""
     home = read(site(tmp_path, [rel(2, 1, 0.7, 200), rel(3, 2, 0.6, 200)]), "/")
-    date, old = sb.ERA_STARTS[sb.spec_hash(spec)]
-    assert f"A new rating era started with spec {sb.spec_hash(spec)} on {date}" in home and old in home
+    assert "Submissions closed" in home and "being decided" in home and "These are not Arena ratings" in home
+    assert "HustleBot generations" in home and "Open seat" not in home and "Recent promotions" in home
 
 
 def test_submissions_are_paused(tmp_path):
