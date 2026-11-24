@@ -27,7 +27,10 @@ the human locks in it has at most LOCK_CAP_S (10 s) more (`Clock.lock_cap`). A s
 at once (a cap, not a minimum). If the cap cuts the production search, its best-so-far mix is played
 (`partial-full`, as for a deadline), the quick search only if it solved no round by LOCK_CAP_S less the emergency
 margin after the lock-in, and Continue if not even that finished. Timed decisions never get it: their turn deadline
-(above) is unchanged.
+(above) is unchanged. Once the production search has a converged answer (its base double oracle's equilibrium, kept as
+the best-so-far), the cap shrinks to LOCK_CONVERGED_S after the later of the lock-in and that answer ("lock-converged"):
+only factor refinement is cut, and the turn plays its latest converged answer. A chess bank turn also stops refinement
+at its share of the bank (`bank_refine_s`, "refine-share"); neither rule ever cuts a search that has no converged round.
 
 **Think until I lock in** (on by default since private build v4: the bot uses the human's thinking time): the
 bot answers a decision with the deepest search it finished before it had to stop, at the latest THINK_CAP_S
@@ -95,6 +98,11 @@ EMERGENCY_FRACTION = 0.15
 THINK_CAP_S = 60.0
 # No turn timer: once the human locks in, the bot has at most this much longer to answer (human_play --lock-cap).
 LOCK_CAP_S = 10.0
+# Once the human has locked in AND the production search has a converged (certified) answer, the bot answers within
+# this much longer instead of the full after-lock cap (human_play --lock-converged; 0 turns it off): the base double
+# oracle's equilibrium is already playable, so only refinement's last rounds are lost, and only on turns where the
+# human was fast. Counted from the later of the two. The full LOCK_CAP_S stays while nothing has converged.
+LOCK_CONVERGED_S = 1.5
 # A chess clock (ranked: a 15-minute bank, a 15 s floor per turn): the bot spends its bank about as the human spends
 # theirs, but never plans a decision past (bank left - BANK_RESERVE_S) (human_play --bank-reserve). With no more room
 # than the floor's own stop it plays on the floor, the per-turn deadline every timed turn has (bank_budget).
@@ -105,6 +113,12 @@ BANK_RESERVE_S = 60.0
 # the floor in every g16 audit game (by turn 29-74). A share of what is left shrinks as the bank does, so it never
 # reaches the floor by itself.
 BANK_DEEP_TURNS = 100.0
+# On a chess bank turn, the production search's factor refinement (everything after its first converged round) stops at
+# 1/BANK_REFINE_TURNS of the room above the reserve (bank_refine_s; human_play --bank-refine-turns; 840 s of room: 21 s),
+# and the turn plays the latest converged answer. The base double oracle keeps the whole budget, so the share never
+# makes a turn answer unsolved. On a slow PC refinement alone took most of each turn and long games bled the bank to the
+# floor (g17 audit: 9-17 floor deadlines in each 100+ turn game); a share of what is left shrinks as the bank does.
+BANK_REFINE_TURNS = 40.0
 PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed answer (human play logs it per turn)
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
 # The match settings that are the game's turn clock, not the simulation (ui/UILayer.gd and main.gd
@@ -114,7 +128,8 @@ TIMER_KEYS = ("timer_mode", "turn_time", "turn_min_length", "increment_starting_
 
 
 class Stopped(Exception):
-    """A stop check fired; `why` is "lock-in", "deadline", "lock-cap", "superseded" or "emergency"."""
+    """A stop check fired; `why` is "lock-in", "deadline", "lock-cap", "lock-converged", "refine-share", "superseded"
+    or "emergency"."""
 
     def __init__(self, why: str):
         super().__init__(why)
@@ -145,6 +160,14 @@ class Clock:
         # emergency point before it. Read lazily from `soft_at`, so a lock-in that arrives before the decision set
         # this still counts. Unset (None) on a floor or per-turn timed decision: its deadline only.
         self.lock_cap: float | None = None
+        # LOCK_CONVERGED_S: with the after-lock cap set, a hard stop ("lock-converged") this long after the later of
+        # the lock-in and `converged_at`. None: the full cap only.
+        self.lock_converged: float | None = None
+        # When the production search first had a converged answer (monotonic; set by its progress hook), else None.
+        self.converged_at: float | None = None
+        # A chess bank turn's refinement share (bank_refine_s): past this (monotonic), a production search that has a
+        # converged answer stops ("refine-share") and plays it. Unset (None) elsewhere; never cuts an unsolved search.
+        self.refine_at: float | None = None
         self.t0 = time.monotonic()
         self._soft, self._hard = threading.Event(), threading.Event()
         self._soft_why = self._hard_why = ""
@@ -183,6 +206,9 @@ class Clock:
         at = self.lock_hard_at()
         if at is not None and time.monotonic() + self.step_s >= at:
             return "lock-cap"
+        at = self.lock_converged_at()
+        if at is not None and time.monotonic() + self.step_s >= at:
+            return "lock-converged"
         if self.superseded is not None and self.superseded():
             return "superseded"
         return None
@@ -192,6 +218,18 @@ class Clock:
         if self.lock_cap is None or self.soft_at is None:
             return None
         return self.soft_at + self.lock_cap
+
+    def lock_converged_at(self) -> float | None:
+        """The early after-lock stop (monotonic): `lock_converged` after the later of the lock-in and the production
+        search's first converged answer. None until both have happened, or without the after-lock cap or this."""
+        if self.lock_cap is None or not self.lock_converged or self.soft_at is None or self.converged_at is None:
+            return None
+        return max(self.soft_at, self.converged_at) + self.lock_converged
+
+    def refine_over(self) -> bool:
+        """A bank turn's refinement share is spent and the production search has a converged answer to play."""
+        return (self.refine_at is not None and self.converged_at is not None
+                and time.monotonic() + self.step_s >= self.refine_at)
 
     def emergency(self) -> float | None:
         """When a production search that has solved nothing yet gives way to the quick search: the turn
@@ -274,6 +312,13 @@ def bank_deep_s(bank_left: float, reserve_s: float = BANK_RESERVE_S, turns: floa
     """How long into a chess-clock bank turn the optional deeper stages may run: this turn's share of the room above
     the reserve, (bank_left - reserve_s) / turns (900 s and the 60 s reserve: 8.4 s). The production search is not
     bound by it (only the bank budget's hard stop and the after-lock cap cut that)."""
+    return max(0.0, bank_left - reserve_s) / turns
+
+
+def bank_refine_s(bank_left: float, reserve_s: float = BANK_RESERVE_S, turns: float = BANK_REFINE_TURNS) -> float:
+    """How long into a chess-clock bank turn the production search's factor refinement may run: this turn's share of
+    the room above the reserve, (bank_left - reserve_s) / turns (900 s and the 60 s reserve: 21 s). Past it the turn
+    plays the latest converged answer; a search with no converged round yet keeps the whole budget (`Clock.refine_at`)."""
     return max(0.0, bank_left - reserve_s) / turns
 
 
@@ -548,6 +593,8 @@ class Deepener:
             at = self.clock.emergency()
             if at is not None and self.partial is None and time.monotonic() >= at:
                 raise Stopped("emergency")
+            if self.clock.refine_over():
+                raise Stopped("refine-share")
 
         def progress(row: list[float], col: list[float], value: float, lists: list[list[Candidate]],
                      converged: bool) -> None:
@@ -560,6 +607,8 @@ class Deepener:
                 self.partial.info["unconverged_rounds_after"] = self.partial.info.get("unconverged_rounds_after", 0) + 1
                 return
             self.partial = Answer(1, "partial-full", lists, row, col, value, info={"converged": converged})
+            if converged and self.clock.converged_at is None:  # the base double oracle's equilibrium: playable now
+                self.clock.converged_at = time.monotonic()
 
         return self._search(self.bot, 1, "production", check, None, progress)
 
@@ -660,7 +709,7 @@ Stage = tuple[int, Callable[[Answer | None], "Answer | None"], bool]  # (number,
 @dataclass
 class Outcome:
     best: Answer | None              # the answer to play (None: nothing finished: P2 holds with Continue)
-    stopped: str                     # "lock-in", "deadline", "lock-cap", "superseded", "emergency", "think-cap" or "done"
+    stopped: str                     # a Stopped `why`, "think-cap" or "done"
     trace: list[dict[str, Any]]      # per stage tried: stage, name, ms, and how it ended
     production: Answer | None        # the production search's answer, if it finished
     path: str = "full"               # one of PATHS: what produced `best`

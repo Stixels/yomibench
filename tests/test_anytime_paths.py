@@ -276,3 +276,81 @@ def test_a_later_converged_round_still_replaces_it(quick_calls):
     clock = Clock(0, hard_at=now + 0.35, emergency_at=now + 0.2)
     out = anytime.think(_ConvergedThenRefiningBot(every=0.04, later_converged_at=2), obs, 1, e, clock, deep=False)
     assert out.path == "partial-full" and out.best.value == pytest.approx(0.7) and out.best.info["converged"] is True
+
+
+# --- pacing on slow PCs (11/24): answer soon after a lock-in once converged; a bank turn's refinement share ---------
+
+def test_once_converged_the_bot_answers_soon_after_the_lock_in_not_at_the_cap(quick_calls):
+    import threading
+
+    e, obs = _toy_position()
+    clock = Clock(0)
+    clock.lock_cap, clock.lock_converged = 10.0, 0.15
+    t0 = time.monotonic()
+    threading.Timer(0.1, clock.signal, args=("locked_in",)).start()
+    out = anytime.think(_ConvergedThenRefiningBot(every=0.03), obs, 1, e, clock, deep=False)
+    took = time.monotonic() - t0
+    assert out.stopped == "lock-converged" and out.path == "partial-full" and not quick_calls
+    assert 0.2 <= took < 1.0  # the lock-in at 0.1 s, then 0.15 s: not the 10 s cap
+    assert out.best.value == pytest.approx(0.42) and out.best.info["converged"] is True
+    assert clock.converged_at is not None and clock.converged_at - t0 < 0.1
+
+
+def test_with_nothing_converged_the_full_after_lock_cap_stays(quick_calls):
+    e, obs = _toy_position()
+    clock = _locked_clock(0.3)
+    clock.lock_converged = 0.01
+    t0 = time.monotonic()
+    out = anytime.think(_RoundsBot(every=0.03), obs, 1, e, clock, deep=False)  # never converges
+    assert out.stopped == "lock-cap" and out.path == "partial-full" and time.monotonic() - t0 >= 0.25
+    assert clock.converged_at is None
+
+
+def test_the_early_stop_counts_from_the_later_of_the_lock_in_and_the_converged_answer():
+    clock = Clock(0)
+    clock.lock_cap, clock.lock_converged = 10.0, 1.5
+    assert clock.lock_converged_at() is None  # neither yet
+    clock.converged_at = time.monotonic() - 5.0
+    assert clock.lock_converged_at() is None and clock.hard() is None  # converged, but the human is still thinking
+    clock.signal("locked_in")
+    assert clock.lock_converged_at() == pytest.approx(clock.soft_at + 1.5)  # converged first: 1.5 s after the lock-in
+    clock.converged_at = clock.soft_at + 4.0
+    assert clock.lock_converged_at() == pytest.approx(clock.soft_at + 5.5)  # converged later: 1.5 s after that
+    assert min(clock.lock_hard_at(), clock.lock_converged_at()) == clock.lock_converged_at()
+    off = _locked_clock(10.0)
+    off.converged_at = time.monotonic()
+    assert off.lock_converged_at() is None  # unset (or 0): the full cap only
+    timed = Clock(0, hard_at=time.monotonic() + 100)  # a per-turn timed decision has no after-lock cap at all
+    timed.lock_converged, timed.converged_at = 1.5, time.monotonic()
+    timed.signal("locked_in")
+    assert timed.lock_converged_at() is None
+
+
+def test_a_bank_turns_refinement_share_plays_the_converged_answer(quick_calls):
+    e, obs = _toy_position()
+    now = time.monotonic()
+    clock = Clock(0, hard_at=now + 30, emergency_at=now + 25)
+    clock.refine_at = now + 0.15
+    out = anytime.think(_ConvergedThenRefiningBot(every=0.03), obs, 1, e, clock, deep=False)
+    assert out.stopped == "refine-share" and out.path == "partial-full" and not quick_calls
+    assert time.monotonic() - now < 1.0 and out.best.value == pytest.approx(0.42)
+
+
+def test_the_refinement_share_never_cuts_a_search_with_nothing_converged(quick_calls):
+    e, obs = _toy_position()
+    now = time.monotonic()
+    clock = Clock(0, hard_at=now + 0.3, emergency_at=now + 0.2)
+    clock.refine_at = now  # spent already
+    out = anytime.think(_RoundsBot(every=0.03), obs, 1, e, clock, deep=False)
+    assert out.stopped == "deadline" and time.monotonic() - now >= 0.25  # the base search kept its whole budget
+
+
+def test_a_search_that_finishes_inside_its_share_is_the_plain_search():
+    e, obs = _toy_position()
+    clock = _locked_clock(10.0)
+    clock.lock_converged = 5.0
+    clock.refine_at = time.monotonic() + 30
+    out = anytime.think(MatrixBot(search="oracle"), obs, 1, e, clock, deep=False)
+    e2, obs2 = _toy_position()
+    row, col, value = MatrixBot(search="oracle").search_turn(obs2, e2, 1)
+    assert out.path == "full" and (out.best.row, out.best.col, out.best.value) == (row, col, value)

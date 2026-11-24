@@ -50,3 +50,22 @@ def test_a_bank_turn_keeps_the_after_lock_cap_beside_its_deadline():
     timed.signal("locked_in")
     assert timed.lock_hard_at() is None and timed.hard() is None
     assert timed.emergency() == timed.emergency_at
+
+
+def test_a_bank_turns_refinement_share_is_a_fortieth_of_its_room():
+    """Refinement (after the first converged round) stops at (bank - reserve) / BANK_REFINE_TURNS; the base double
+    oracle keeps the whole budget (test_anytime_paths covers the stop)."""
+    assert anytime.BANK_REFINE_TURNS == 40.0
+    assert anytime.bank_refine_s(900.0) == pytest.approx(21.0)
+    assert anytime.bank_refine_s(300.0) == pytest.approx(6.0)
+    assert anytime.bank_refine_s(50.0) == 0.0  # under the reserve: nothing (such a turn plays on the floor anyway)
+    assert anytime.bank_refine_s(900.0, turns=20.0) == pytest.approx(42.0)
+
+
+def test_the_refinement_share_shrinks_the_bank_geometrically():
+    """A bot that spends its whole share every turn: (b - r) shrinks by (1 - 1/40) a turn, so 150 turns leave
+    840 * 0.975^150 ~ 19 s of room, while a fixed 21 s a turn reaches the reserve by turn 40."""
+    bank = 900.0
+    for _ in range(150):
+        bank -= anytime.bank_refine_s(bank)
+    assert bank - BANK_RESERVE_S == pytest.approx(840.0 * 0.975 ** 150) and bank > BANK_RESERVE_S
