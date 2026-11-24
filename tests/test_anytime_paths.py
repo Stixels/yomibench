@@ -231,3 +231,48 @@ def test_the_cap_stops_before_a_step_that_would_end_past_it():
     timed = Clock(0, hard_at=time.monotonic() + 3.0)
     timed.note_step(5.0)
     assert timed.hard() is None  # a turn deadline keeps its own margin (unchanged from v4)
+
+
+class _ConvergedThenRefiningBot(MatrixBot):
+    """The base double oracle converges (value 0.42, a mix on move 0), then factor refinement's double oracle reports
+    unconverged rounds (value -0.9, all on the last move) until the clock stops it: the g17 human audit's case."""
+
+    def __init__(self, every: float, later_converged_at: int | None = None):
+        super().__init__(search="oracle")
+        self.every, self.later_converged_at = every, later_converged_at
+
+    def search_turn(self, obs, engine, seat=None):
+        lists = [list(obs.candidates[0]), list(obs.candidates[1])]
+        one = lambda n, i: [1.0 if k == i else 0.0 for k in range(n)]  # noqa: E731
+        if self.progress is not None:
+            self.progress(one(len(lists[0]), 0), one(len(lists[1]), 0), 0.42, lists, True)
+        k = 0
+        while True:
+            t = time.monotonic()
+            while time.monotonic() - t < self.every:
+                self.value(obs.state, 0)  # the guarded evaluator: the stop check
+                time.sleep(0.002)
+            k += 1
+            done = self.later_converged_at is not None and k >= self.later_converged_at
+            if self.progress is not None:
+                self.progress(one(len(lists[0]), len(lists[0]) - 1), one(len(lists[1]), len(lists[1]) - 1),
+                              0.7 if done else -0.9, lists, done)
+
+
+def test_a_cut_refinement_never_replaces_the_converged_answer_with_an_unconverged_round(quick_calls):
+    e, obs = _toy_position()
+    now = time.monotonic()
+    clock = Clock(0, hard_at=now + 0.3, emergency_at=now + 0.15)
+    out = anytime.think(_ConvergedThenRefiningBot(every=0.04), obs, 1, e, clock, deep=False)
+    assert out.path == "partial-full" and out.stopped == "deadline" and not quick_calls
+    assert out.best.value == pytest.approx(0.42) and out.best.info["converged"] is True  # the certified answer
+    assert out.best.col[0] == 1.0  # its own mix, not the refinement round's
+    assert out.best.info["unconverged_rounds_after"] >= 3 and out.best.info["rounds_seen"] >= 4
+
+
+def test_a_later_converged_round_still_replaces_it(quick_calls):
+    e, obs = _toy_position()
+    now = time.monotonic()
+    clock = Clock(0, hard_at=now + 0.35, emergency_at=now + 0.2)
+    out = anytime.think(_ConvergedThenRefiningBot(every=0.04, later_converged_at=2), obs, 1, e, clock, deep=False)
+    assert out.path == "partial-full" and out.best.value == pytest.approx(0.7) and out.best.info["converged"] is True

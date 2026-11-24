@@ -551,8 +551,15 @@ class Deepener:
 
         def progress(row: list[float], col: list[float], value: float, lists: list[list[Candidate]],
                      converged: bool) -> None:
-            self.partial = Answer(1, "partial-full", lists, row, col, value, info={"converged": converged})
+            # A certified (converged) best-so-far is replaced only by another converged one. The base double oracle
+            # converges, then factor refinement runs further double-oracle searches whose early rounds are unconverged
+            # mixes: letting those replace it played unsolved strategies whenever the clock cut refinement (g17 human
+            # audit, 11/23: 106 of 116 unconverged partial-full turns, e.g. Taunt at 100% at 144 HP).
             self.partial_rounds += 1
+            if self.partial is not None and self.partial.info.get("converged") and not converged:
+                self.partial.info["unconverged_rounds_after"] = self.partial.info.get("unconverged_rounds_after", 0) + 1
+                return
+            self.partial = Answer(1, "partial-full", lists, row, col, value, info={"converged": converged})
 
         return self._search(self.bot, 1, "production", check, None, progress)
 
