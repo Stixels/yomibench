@@ -343,6 +343,24 @@ def sides(v) -> tuple[str, str]:
     return (b, a) if (v.get("new_side") or "").startswith("right") else (a, b)
 
 
+def by_seat(v) -> list[tuple[str, str, str]]:
+    """The game's two bots as the video shows them: [(seat class, bot, character)], P1 (left) first. Labels take each
+    seat's in-game fighter colour (P1 lavender, P2 salmon), so a seat-swapped game reads the way it plays."""
+    (a, b), (mine, opp) = v["bots"], sides(v)
+    new_right = (v.get("new_side") or "").startswith("right")
+    return [("p1", b, opp), ("p2", a, mine)] if new_right else [("p1", a, mine), ("p2", b, opp)]
+
+
+def seat_line(v, *, bold: bool, small: bool) -> str:
+    """'<P1 bot> <character> vs <P2 bot> <character>', each side in its seat's colour."""
+    def side(cls, bot, char):
+        name = f"<b>{esc(short(bot))}</b>" if bold else esc(short(bot))
+        ch = f"<small>{esc(char)}</small>" if small else esc(char)
+        return f'<span class="{cls}" title="{"P1, left" if cls == "p1" else "P2, right"}">{name} {ch}</span>'
+    (c1, b1, ch1), (c2, b2, ch2) = by_seat(v)
+    return f'{side(c1, b1, ch1)}<span class="vs">vs</span>{side(c2, b2, ch2)}'
+
+
 def moment(v) -> str:
     """The game's headline from its `why` ("Cowboy mirror, best comeback: from -1230 hp" -> "From −1,230 hp")."""
     text = (v.get("why") or "").partition(": ")[2] or (v.get("why") or "")
@@ -635,7 +653,7 @@ def replay_card(v, *, show_gen: bool = True, feature: bool = False) -> str:
     inline player), the moment it shows, who played which side, and filter data for the Replays page."""
     res = (v.get("result") or "").lower()
     mine, opp = sides(v)
-    a, b = v["bots"]
+    a = v["bots"][0]
     seat = (v.get("new_side") or "").replace("left, P1", "P1, left").replace("right, P2", "P2, right")
     turns = turns_of(v)
     facts = " · ".join(x for x in (f"{turns} turns" if turns else "", clock(v.get("seconds"))) if x)
@@ -652,8 +670,7 @@ def replay_card(v, *, show_gen: bool = True, feature: bool = False) -> str:
             + f'</a><div class="rbody"><div class="rtop"><span class="slot">{esc(slot)}</span>'
             f'<span class="res {esc(res)}">{esc(res.title())}</span></div>'
             f'<h3 class="moment">{esc(moment(v))}</h3>'
-            f'<p class="fight"><span class="me"><b>{esc(short(a))}</b> {esc(mine)}</span><span class="vs">vs</span>'
-            f'<span class="them">{esc(short(b))} {esc(opp)}</span></p>'
+            f'<p class="fight">{seat_line(v, bold=True, small=False)}</p>'
             f'<p class="meta">{esc(short(a))} played {esc(seat)}{" · " + esc(facts) if facts else ""}'
             + (f' · <a href="{L(bot_route(a))}">{esc(label(a))}</a>' if show_gen else "")
             + '</p></div></article>')
@@ -963,16 +980,14 @@ def build(releases: Path, docs: Path, out: Path | None, arena: Path | None = Non
             btns.append(f'<a class="btn ghost" href="{L("/play/")}">Play against HustleBot</a>')
         vid = ""
         if best:
-            a, b = best["bots"]
+            a = best["bots"][0]
             chips = [x for x in (best.get("matchup"), f"{turns_of(best)} turns" if turns_of(best) else "",
                                  clock(best.get("seconds")), f'{(best.get("result") or "").title()} for {short(a)}') if x]
             poster = f' poster="{M(best["poster"])}"' if best.get("poster") else ""
-            mine, opp = sides(best)
             vid = (f'<figure class="herovid"><div class="screen"><video data-autoplay muted loop playsinline controls '
                    f'preload="metadata"{poster} src="{M(best["file"])}"></video></div><figcaption>'
-                   f'<p class="eyebrow">Showcase match</p><p class="vsline"><span class="me">{esc(short(a))} '
-                   f'<small>{esc(mine)}</small></span><span class="vs">vs</span><span class="them">{esc(short(b))} '
-                   f'<small>{esc(opp)}</small></span></p><p class="small">{esc(why)}.'
+                   f'<p class="eyebrow">Showcase match</p><p class="vsline">{seat_line(best, bold=False, small=True)}'
+                   f'</p><p class="small">{esc(why)}.'
                    f'{" " + esc(short(a)) + " played " + esc(best["new_side"]) + "." if best.get("new_side") else ""}'
                    f'</p><div class="chips">{"".join(f"<span class=chip>{esc(x)}</span>" for x in chips)}</div>'
                    f'</figcaption></figure>')

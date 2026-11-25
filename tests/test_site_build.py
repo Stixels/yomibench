@@ -217,3 +217,19 @@ def test_history_records_and_replays(tmp_path):
     assert history.count('class="tl-item') == 2 and 'class="chart"' in history and "bots/g3/" in history
     bot = read(out, "/bots/g3/")
     assert 'class="hm"' in bot and "Cowboy vs the cast" in bot and "played P2, right" in bot
+
+
+def test_replay_labels_follow_the_seats_not_the_generations(tmp_path):
+    """User, 11/25: each side's label is in its seat's in-game colour, P1 (left) first, so a seat-swapped game reads
+    the way it plays. g3 played P2 (Cowboy) against g2's Wizard on P1: g2 Wizard is the P1 label, g3 Cowboy the P2."""
+    swapped = {**vid(3, 2, "cast", 80), "group": "cast", "matchup": "Wizard vs Cowboy", "new_side": "right, P2"}
+    assert sb.by_seat({**swapped, "bots": ("gen-3", "gen-2")}) == [("p1", "gen-2", "Wizard"), ("p2", "gen-3", "Cowboy")]
+    assert sb.by_seat({**vid(3, 2, "a"), "bots": ("gen-3", "gen-2")}) == [("p1", "gen-3", "Cowboy"), ("p2", "gen-2", "Cowboy")]
+    out = site(tmp_path, [rel(2, 1, 0.7, 200), rel(3, 2, 0.55, 800, videos=[swapped])])
+    card = re.search(r'<p class="fight">(.*?)</p>', read(out, "/replays/")).group(1)
+    assert re.fullmatch(r'<span class="p1"[^>]*><b>g2</b> Wizard</span><span class="vs">vs</span>'
+                        r'<span class="p2"[^>]*><b>g3</b> Cowboy</span>', card), card
+    hero = re.search(r'<p class="vsline">(.*?)</p>', read(out, "/")).group(1)
+    assert hero.index('class="p1"') < hero.index('class="p2"') and "g2 <small>Wizard</small>" in hero
+    css = (ROOT / "site" / "style.css").read_text(encoding="utf-8")
+    assert ".vsline .p1, .fight .p1 { color: var(--p1); }" in css and css.count("--p1:") == 3 and css.count("--p2:") == 3
