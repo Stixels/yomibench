@@ -65,6 +65,20 @@ per `continue`. A lock-in therefore lands within one chunk, about 50 ms.
 
 Nothing here is used by self-play, gates or the arena; with the option off, human play only uses
 its `Clock` (a few attributes per decision) and never runs a stage.
+
+**Quick policy** (human_play --quick-policy PATH --quick-policy-sha256 SHA; default off, and off changes
+nothing: every answer is bit for bit the one without it). A pinned policy net (yomibench.quick_policy, the
+same file and menu rule self-play's quick turns use) helps three places:
+
+- the emergency quick turn searches each seat's policy menu (QUICK_POLICY_MENU at QUICK_POLICY_CAP, as
+  self-play's cheap_cap_policy) instead of `cap_candidates` QUICK_CAP options-shuffle;
+- stages 1 and 2 warm-start their first double-oracle round from each seat's first candidate plus its
+  `oracle_start` best-scored others (`MatrixBot.start_policy`) instead of a seeded random sample. Only the
+  start changes: the search still certifies its answer against every candidate, so the production answer
+  is an equilibrium of the same lists (it can be another one when the game has several);
+- stages 3 and 4 solve each branched pair's next decision over both seats' policy menus (the same rule,
+  salted by the pair) instead of every candidate, warm-started the same way. A child's value is the
+  evaluator's anyway; the menus let more pairs branch before a stop.
 """
 
 from __future__ import annotations
@@ -76,7 +90,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from yomibench.bots import FactorExplore, MatrixBot, preview_states, turn_candidates
+from yomibench.bots import FactorExplore, MatrixBot, policy_start, preview_states, turn_candidates
 from yomibench.engine import Candidate, Engine, Observation
 from yomibench.playout import cap_candidates
 from yomibench.search import double_oracle
@@ -121,6 +135,8 @@ BANK_DEEP_TURNS = 100.0
 BANK_REFINE_TURNS = 40.0
 PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed answer (human play logs it per turn)
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
+# With a quick policy (human_play --quick-policy): self-play's policy-picked quick menus (yomibench.quick_policy).
+QUICK_POLICY_MENU, QUICK_POLICY_CAP = "policy40+gumbel8+parryx6", 48
 # The match settings that are the game's turn clock, not the simulation (ui/UILayer.gd and main.gd
 # read them; game.gd never does): kept for the deadline, never sent to the sim.
 TIMER_KEYS = ("timer_mode", "turn_time", "turn_min_length", "increment_starting_time", "increment_per_turn",
@@ -522,10 +538,13 @@ class Deepener:
 
     TWO_DECISION = ((3, 4, 2), (3, 8, 2), (4, 16, 3))  # (stage, K, re-solve rounds)
 
-    def __init__(self, bot: MatrixBot, obs: Observation, seat: int, engine: Engine, clock: Clock):
+    def __init__(self, bot: MatrixBot, obs: Observation, seat: int, engine: Engine, clock: Clock,
+                 quick_policy: Any = None):
         if not isinstance(bot, MatrixBot):
             raise ValueError("thinking until lock-in needs a matrix bot")
         self.bot, self.obs, self.seat, self.engine, self.clock = bot, obs, seat, engine, clock
+        # A pinned yomibench.quick_policy.QuickPolicy (human_play --quick-policy), or None: off (see the module doc).
+        self.quick_policy = quick_policy
         self.depth2: dict[tuple[int, int], float] = {}  # (id p1, id p2) -> solved subgame value (p1's)
         self.leaf: dict[tuple[Any, int, int], float] = {}  # (view, i, j) -> evaluator value (p1's)
         self.unbranchable: set[tuple[int, int]] = set()
@@ -560,8 +579,16 @@ class Deepener:
         b.value = GuardedValue(self.bot.value, check, VALUE_CHUNK, self.clock.work, step=self.clock.note_step)
         self.keep.append(b.value)
         eng = Guarded(self.engine, check, work=self.clock.work, step=self.clock.note_step)
-        base = [cap_candidates(c, QUICK_CAP, QUICK_POLICY, f"{self.engine.match_seed}:{self.obs.turn}:{s}")
-                for s, c in enumerate(self.obs.candidates)]
+        qp = self.quick_policy
+        if qp is None:
+            cap, cap_policy = QUICK_CAP, QUICK_POLICY
+            base = [cap_candidates(c, QUICK_CAP, QUICK_POLICY, f"{self.engine.match_seed}:{self.obs.turn}:{s}")
+                    for s, c in enumerate(self.obs.candidates)]
+        else:  # self-play's policy-picked quick menus (salt "seed:turn", as its cheap view)
+            cap, cap_policy = QUICK_POLICY_CAP, QUICK_POLICY_MENU
+            check()
+            base = qp.menus(self.obs.state, self.obs.candidates, cap, cap_policy,
+                            f"{self.engine.match_seed}:{self.obs.turn}")
         shared, private = self.engine.turn_cache, {"base": base}
         self.engine.turn_cache = private
         try:
@@ -569,7 +596,9 @@ class Deepener:
             lists = turn_candidates(self.obs, eng, b._key(self.seat))  # type: ignore[arg-type]
         finally:
             self.engine.turn_cache = shared
-        info = {**dict(private.get("oracle") or {}), "cap": QUICK_CAP, "cap_policy": QUICK_POLICY}
+        info = {**dict(private.get("oracle") or {}), "cap": cap, "cap_policy": cap_policy}
+        if qp is not None:
+            info["quick_policy"] = qp.sha256
         return Answer(0, "quick", lists, row, col, value, info=info)
 
     # --- stages 1 and 2: the matrix bot's own search -----------------------------------------
@@ -578,6 +607,8 @@ class Deepener:
                 chunk: int | None, progress: Callable[..., None] | None = None) -> Answer:
         b = copy.copy(bot)
         b.progress = progress
+        if self.quick_policy is not None:
+            b.start_policy = self.quick_policy  # the warm start (module doc); its own search key and view
         b.value = GuardedValue(bot.value, check, chunk, self.clock.work, step=self.clock.note_step)
         self.keep.append(b.value)
         eng = Guarded(self.engine, check, work=self.clock.work, step=self.clock.note_step)
@@ -647,6 +678,16 @@ class Deepener:
             c0, c1 = h.candidates
             if not c0 or not c1 or len(c0) * len(c1) == 1:
                 return None
+            seed = f"{self.engine.match_seed}:{self.obs.turn}:{ids[0]}:{ids[1]}:depth2"
+            qp = self.quick_policy
+            if qp is not None:  # both seats' policy menus, warm-started from their best scores (module doc)
+                self.clock.check_soft()
+                (c0, s0), (c1, s1) = qp.scored_menus(h.state, [c0, c1], QUICK_POLICY_CAP, QUICK_POLICY_MENU, seed,
+                                                     need_scores=True)
+                start = (policy_start(s0, self.bot.oracle_start), policy_start(s1, self.bot.oracle_start))
+            else:
+                start = tuple([0] + random.Random(f"{seed}:{s}").sample(range(1, n), min(self.bot.oracle_start, n - 1))
+                              for s, n in enumerate((len(c0), len(c1))))
 
             def child(pairs: list[tuple[int, int]]) -> list[float]:
                 out: list[float] = []
@@ -658,9 +699,6 @@ class Deepener:
                     out += value.many([o.state for o in obs])
                 return out
 
-            seed = f"{self.engine.match_seed}:{self.obs.turn}:{ids[0]}:{ids[1]}:depth2"
-            start = tuple([0] + random.Random(f"{seed}:{s}").sample(range(1, n), min(self.bot.oracle_start, n - 1))
-                          for s, n in enumerate((len(c0), len(c1))))
             r = double_oracle(len(c0), len(c1), child, self.bot.iterations, self.bot.tolerance, start=start)
             return r.value if r.converged else None
         finally:
@@ -751,12 +789,14 @@ def run(stages: list[Stage], clock: Clock) -> Outcome:
     return Outcome(best, stopped, trace, production)
 
 
-def think(bot: MatrixBot, obs: Observation, seat: int, engine: Engine, clock: Clock, *, deep: bool = True) -> Outcome:
+def think(bot: MatrixBot, obs: Observation, seat: int, engine: Engine, clock: Clock, *, deep: bool = True,
+          quick_policy: Any = None) -> Outcome:
     """`bot`'s answer for `seat`: production's search, then, with `deep`, deeper stages until the clock
     stops it or every stage is done. If a hard stop cuts the production search (a turn timer's deadline),
     its best-so-far round is played (`partial-full`). With nothing solved by the clock's `emergency_at`, the
-    quick search gets the time left until the deadline (`quick`); if even that is cut, nothing (`continue`)."""
-    d = Deepener(bot, obs, seat, engine, clock)
+    quick search gets the time left until the deadline (`quick`); if even that is cut, nothing (`continue`).
+    `quick_policy` (a pinned yomibench.quick_policy.QuickPolicy, or None: off) as the module doc says."""
+    d = Deepener(bot, obs, seat, engine, clock, quick_policy=quick_policy)
     out = run(d.stages(deep=deep), clock)
     if out.best is not None:
         return out  # full: the production search finished (and maybe deeper stages after it)

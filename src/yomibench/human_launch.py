@@ -21,7 +21,7 @@ from typing import Callable, ContextManager
 from yomibench.anytime import (BANK_DEEP_TURNS, BANK_REFINE_TURNS, BANK_RESERVE_S, LOCK_CAP_S, LOCK_CONVERGED_S,
                                THINK_CAP_S)
 from yomibench.game import EXE, PACK, build_run_dir
-from yomibench.human_play import Server, Session, worker_paused
+from yomibench.human_play import Server, Session, load_quick_policy, worker_paused
 
 # The game version the sim follows: the sha256 of 1.10.0-steam's pack (the archived build's MANIFEST).
 # A hash, not game content. Another version may desync every turn or break the mod outright.
@@ -165,5 +165,5 @@ def session_kwargs(args, bot) -> dict:
                 bank_refine_turns=getattr(args, "bank_refine_turns", BANK_REFINE_TURNS),
                 turn_timer=turn_timer_arg(args),
                 deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
-                engine_spec=getattr(args, "engine", None))
+                engine_spec=getattr(args, "engine", None), quick_policy=load_quick_policy(args))
 

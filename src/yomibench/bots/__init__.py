@@ -104,6 +104,11 @@ class MatrixBot:
         # Candidate set 7's di_fine_all children only for this many support candidates per seat, the most
         # likely first (`make_bot`'s @di_fine_moves=K); None: every support candidate (the default).
         self.di_fine_moves: int | None = None
+        # Human play's quick policy only (yomibench.anytime with --quick-policy; default None, and None changes
+        # nothing): an object with `scores(state, seat, candidates)` and `sha256`. The first double-oracle round
+        # then starts from each seat's first candidate plus its `oracle_start` best-scored others instead of a
+        # seeded random sample. Only the warm start changes: the search still certifies against every candidate.
+        self.start_policy: Any = None
         self.name = "matrix" if search == "full" else "matrix-do"
 
     def _key(self, seat: int | None = None) -> tuple:
@@ -113,6 +118,8 @@ class MatrixBot:
                self.di_refine_moves, self.explore, id(self.value))
         if getattr(self, "di_fine_moves", None) is not None:  # absent from the key at its default
             key += (("di_fine_moves", self.di_fine_moves),)
+        if getattr(self, "start_policy", None) is not None:  # absent from the key at its default
+            key += (("start_policy", self.start_policy.sha256),)
         if self.policy is None:
             return key
         return key + (self.policy,) + ((("own", seat),) if self.policy.scope == "own" else ())
@@ -178,10 +185,15 @@ class MatrixBot:
                     progress(full(res.row, 0), full(res.col, 1), res.value, [list(cands[0]), list(cands[1])],
                              res.converged)
 
-            start = tuple(
-                [0] + random.Random(f"{match}:{obs.turn}:{obs.state.get('tick')}:{s}")
-                .sample(range(1, n), min(self.oracle_start, n - 1))
-                for s, n in enumerate((len(kept[0]), len(kept[1]))))
+            start_policy = getattr(self, "start_policy", None)
+            if start_policy is None:
+                start = tuple(
+                    [0] + random.Random(f"{match}:{obs.turn}:{obs.state.get('tick')}:{s}")
+                    .sample(range(1, n), min(self.oracle_start, n - 1))
+                    for s, n in enumerate((len(kept[0]), len(kept[1]))))
+            else:
+                start = tuple(policy_start(start_policy.scores(obs.state, s, [cands[s][i] for i in kept[s]]),
+                                           self.oracle_start) for s in (0, 1))
             r = double_oracle(len(kept[0]), len(kept[1]), sub_pairs, self.iterations, self.tolerance, start=start,
                               on_round=on_round)
             info = {"rounds": r.rounds, "converged": r.converged, "fallback": False}
@@ -658,6 +670,14 @@ def _depth(path: int, b: int) -> int:
         path //= b
         n += 1
     return n
+
+
+def policy_start(scores: Any, k: int) -> list[int]:
+    """A double-oracle warm start from policy scores (one per candidate): the first candidate, then the `k`
+    best-scored others (ties by list order)."""
+    n = len(scores)
+    rest = sorted(range(1, n), key=lambda i: (-float(scores[i]), i))[:max(0, min(k, n - 1))]
+    return [0] + rest
 
 
 @dataclass(frozen=True)
