@@ -481,9 +481,12 @@ class Session:
                  bank_refine_turns: float = anytime.BANK_REFINE_TURNS,
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
                  deadline_fraction: float = anytime.DEADLINE_FRACTION, log: Callable[[str], None] = print,
-                 engine_spec: str | None = None, bot_factory: Callable[[str], Any] | None = None):
+                 engine_spec: str | None = None, bot_factory: Callable[[str], Any] | None = None,
+                 quick_policy: Any = None):
         """`bot_factory(bot_spec)` builds the bot (default yomibench.bots.make_bot): a build that plays a search
-        variant of its own (e.g. a candidate set's extra pass) passes its own."""
+        variant of its own (e.g. a candidate set's extra pass) passes its own. `quick_policy` (a pinned
+        yomibench.quick_policy.QuickPolicy, `load_quick_policy`; default None: off, and off changes nothing) is
+        the stoppable search's policy net (yomibench.anytime's module doc)."""
         from yomibench.bots import make_bot
 
         self.bot_spec, self.candidate_set = bot_spec, candidate_set
@@ -509,6 +512,7 @@ class Session:
         if not bank_refine_turns >= 0:
             raise ValueError(f"bank refine turns must be >= 0 (0: no refinement share): {bank_refine_turns}")
         self.bank_refine_turns = float(bank_refine_turns)
+        self.quick_policy = quick_policy
         self.bot = (bot_factory or make_bot)(bot_spec)
         if getattr(self.bot, "playout_cap", None):  # human play always searches full turns
             raise ValueError(f"{bot_spec}: human play searches every turn in full; drop the @cheap option")
@@ -709,7 +713,8 @@ class Session:
                  "settings_refused": refused, "mod": msg.get("mod"),
                  "yomibench": ledger.git_info(),
                  "engine": ledger.engine_info({**self.hello, "match_settings": {**self.settings, **overrides}}),
-                 "bot_config": self.bot.config() if hasattr(self.bot, "config") else None})
+                 "bot_config": self.bot.config() if hasattr(self.bot, "config") else None,
+                 **({"quick_policy": self.quick_policy.header()} if self.quick_policy is not None else {})})
         if refused:
             g.sim_error = refused
             self.log(f"game {gid}: {refused}")
@@ -901,7 +906,8 @@ class Session:
         emergency point. Without one, nothing cuts the production search. With `deep` (think until
         lock-in), deeper stages follow until the human locks in. Returns the log's bot info and the
         reply's `depth`."""
-        out = anytime.think(self.bot, obs, BOT_SEAT, self.engine, clock, deep=deep)  # type: ignore[arg-type]
+        out = anytime.think(self.bot, obs, BOT_SEAT, self.engine, clock, deep=deep,  # type: ignore[arg-type]
+                            quick_policy=self.quick_policy)
         style = g.options.get("pick", "mixed")
         cands = obs.candidates[BOT_SEAT]
 
@@ -1285,6 +1291,11 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
                     help="ranked (a chess clock): the full search's refinement stops at 1/N of the bank's room above "
                          "the reserve per turn and plays its converged answer; its base search keeps the whole room "
                          f"(default {anytime.BANK_REFINE_TURNS:g}; 0: off)")
+    ap.add_argument("--quick-policy", default=None, metavar="PATH",
+                    help="a pinned policy net (.npz) for the stoppable search: the emergency quick turn's menus, the full "
+                         "search's warm start and the two-decision stages' child menus (default: none, off)")
+    ap.add_argument("--quick-policy-sha256", default=None, metavar="SHA",
+                    help="--quick-policy's sha256: a missing file or a mismatch refuses to start")
     ap.add_argument("--engine", default=None, metavar="sim|game-pool:N|game-pool:auto",
                     help="the bot's engine: a simulator plugin (sim) or N headless copies of your own game (game-pool, sized to "
                          "this PC with auto). Default: sim when it is installed, else game-pool:auto")
@@ -1298,6 +1309,19 @@ def check_deadline_args(args: argparse.Namespace) -> None:
         raise SystemExit(f"--deadline-margin can only tighten the deadline: at least {anytime.DEADLINE_MARGIN_S} s, not {m}")
     if f is not None and not anytime.DEADLINE_FRACTION <= f < 1:
         raise SystemExit(f"--deadline-fraction can only tighten the deadline: in [{anytime.DEADLINE_FRACTION}, 1), not {f}")
+
+
+def load_quick_policy(args: argparse.Namespace) -> Any:
+    """--quick-policy PATH --quick-policy-sha256 SHA as a pinned yomibench.quick_policy.QuickPolicy (both or
+    neither; a missing file or a sha mismatch refuses to start), or None without them."""
+    path, sha = getattr(args, "quick_policy", None), getattr(args, "quick_policy_sha256", None)
+    if path is None and sha is None:
+        return None
+    if not path or not sha:
+        raise SystemExit("--quick-policy and --quick-policy-sha256 go together")
+    from yomibench.quick_policy import QuickPolicy
+
+    return QuickPolicy.load(path, sha)
 
 
 def bot_from_args(args: argparse.Namespace, log: Callable[[str], None] = print) -> BotChoice:
@@ -1334,7 +1358,7 @@ def main(argv: list[str] | None = None) -> int:
                       deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
                       bank_reserve=args.bank_reserve, bank_deep_turns=args.bank_deep_turns,
                       lock_converged=args.lock_converged, bank_refine_turns=args.bank_refine_turns,
-                      engine_spec=args.engine)
+                      engine_spec=args.engine, quick_policy=load_quick_policy(args))
     server = Server(session, args.port, args.host)
     print(f"human-play bot server: {session.label} (candidate set {bot.candidate_set}) on {args.host}:{server.port}; "
           f"engine build {session.hello.get('build', {}).get('yomisim_sha', '?')[:7]}; logs in {session.out}", flush=True)
