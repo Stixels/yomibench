@@ -280,3 +280,28 @@ def add_extra_count_options(cands: list[Candidate], base: list[Candidate], salt:
                 keep.add(cands[i].id)
                 shown.add(key_of[i])
     return [c for c in cands if c.id in keep]
+
+
+def displace(menu: list[Candidate], n: int, counts: bool = False) -> set[int]:
+    """The ids of up to `n` aim variants a quick menu gives up for toggled options (L4's slot rule):
+    each time, from the move (never Continue) with the most variants left, its last listed variant whose
+    option (`_option_tuples`, with `counts` as the policy has it) another kept variant of the move still
+    shows. So no move loses its last variant and no option leaves the menu (a parry timing stays); with
+    no such variant left, fewer than n."""
+    by: dict[str, list[Candidate]] = {}
+    for c in menu:
+        if c.action != "Continue":
+            by.setdefault(c.action, []).append(c)
+    gone: set[int] = set()
+    while len(gone) < n:
+        best = None
+        for cs in by.values():
+            left = [c for c in cs if c.id not in gone]
+            keys = _option_tuples(left, counts)[0]
+            spare = [c for k, c in enumerate(left) if keys[k] in keys[:k]]  # a later variant of a shown option
+            if spare and (best is None or len(left) > best[0]):
+                best = (len(left), spare[-1])
+        if best is None:
+            break
+        gone.add(best[1].id)
+    return gone

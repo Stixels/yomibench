@@ -42,8 +42,14 @@ from typing import Any
 
 import numpy as np
 
-QUICK_POLICIES = ("policy40+gumbel8", "policy40+gumbel8+parryx6")
-_NAME = re.compile(r"^policy(\d+)\+gumbel(\d+)(?:\+parryx(\d+))?$")
+QUICK_POLICIES = ("policy40+gumbel8", "policy40+gumbel8+parryx6",
+                  # quick-toggles-di: + up to B policy-picked DI/feint/reverse/extra_set variants (add_tdi)
+                  "policy40+gumbel8+tdi8", "policy40+gumbel8+parryx6+tdi8",
+                  "policy40+gumbel8+tdi4", "policy40+gumbel8+parryx6+tdi4")
+_NAME = re.compile(r"^policy(\d+)\+gumbel(\d+)(?:\+parryx(\d+))?(?:\+tdi\d+)?$")
+TDI_SUFFIX = "+tdi"
+TDI_MOVES = 8  # the M kept menu candidates (highest policy score) whose one-factor variants form the pool
+TDI_FACTORS = ("di", "feint", "reverse", "extra_set")  # generic factors; set 5/7 path factors are not used
 
 
 def is_quick_policy(policy: str | None) -> bool:
@@ -163,6 +169,78 @@ class QuickPolicy:
             at = {c.id: i for i, c in enumerate(cands)}
             out.append((menu, np.asarray([sc[at[c.id]] for c in menu])))
         return out
+
+
+def tdi_budget(policy: str | None) -> int:
+    """B of a "+tdiB" quick policy (0 without the suffix)."""
+    _, sep, b = (policy or "").partition(TDI_SUFFIX)
+    return int(b) if sep else 0
+
+
+def tdi_pool(engine: Any, seat: int, menu: list[Any], scores: Any, m: int = TDI_MOVES) -> list[Any]:
+    """The +tdiB pool for one seat: for the `m` menu candidates with the highest policy score (Continue included),
+    every variant with exactly one of TDI_FACTORS changed (all its values; feint/reverse flipped), from the
+    candidate's own factor values, built by `engine.expand` (refinement's spec). Refusals and candidates whose
+    content is already in the menu (or repeated) are dropped. No move, control or character is named."""
+    from yomibench.bots import FACTOR_DEFAULTS, _content, _factor_values
+
+    order = sorted(range(len(menu)), key=lambda i: (-float(scores[i]), i))[:m]
+    specs = []
+    for i in order:
+        c = menu[i]
+        if not c.factors:
+            continue
+        base = c.id if c.base is None else c.base
+        values = {f: (c.values or {}).get(f, FACTOR_DEFAULTS.get(f)) for f in c.factors}
+        for f in TDI_FACTORS:
+            if f not in c.factors:
+                continue
+            for v in _factor_values(f, c.factors[f]):
+                if v != values.get(f):
+                    specs.append({"seat": seat, "candidate": base, "extra_override": {**values, f: v}})
+    if not specs:
+        return []
+    seen = {_content(c) for c in menu}
+    out = []
+    for r in engine.expand(specs):
+        if not hasattr(r, "action"):
+            continue  # refused (a reason string)
+        key = _content(r)
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def add_tdi(engine: Any, state: dict[str, Any], menus: list[list[Any]], policy: str, salt: str,
+            qp: "QuickPolicy | None" = None) -> list[list[Any]]:
+    """`menus` with, under a "+tdiB" policy, up to B pool variants per seat (`tdi_pool`) picked by the policy's
+    Gumbel top-k (logit + Gumbel(0, 1), generator seeded by sha256("salt:seat:tdi")), in place of as many aim
+    variants (playout.displace), so the menu keeps its size; without the suffix, `menus`."""
+    b = tdi_budget(policy)
+    if b <= 0:
+        return menus
+    from yomibench.playout import displace
+
+    qp = qp or active(policy)
+    out = []
+    for seat, menu in enumerate(menus):
+        menu = list(menu)
+        room = len(displace(menu, b))
+        if not room or not menu:
+            out.append(menu)
+            continue
+        pool = tdi_pool(engine, seat, menu, qp.net.scores(state, seat, menu))
+        if not pool:
+            out.append(menu)
+            continue
+        s = f"{salt}:{seat}"
+        rng = np.random.default_rng(int(hashlib.sha256(f"{s}:tdi".encode()).hexdigest()[:16], 16))
+        pert = np.asarray(qp.net.scores(state, seat, pool), dtype=np.float64) + rng.gumbel(size=len(pool))
+        pick = [pool[i] for i in np.argsort(-pert, kind="stable")[:min(b, room)]]
+        gone = displace(menu, len(pick))
+        out.append([c for c in menu if c.id not in gone] + pick)
+    return out
 
 
 ACTIVE: QuickPolicy | None = None

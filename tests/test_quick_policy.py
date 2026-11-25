@@ -264,9 +264,9 @@ def test_on_the_quick_turn_searches_the_policy_menus():
     e, obs = _toy_position()
     qp = _Recording(keep=3)
     q = anytime.Deepener(MatrixBot(search="oracle"), obs, 1, e, Clock(0), quick_policy=qp).quick()
-    assert ("menus", anytime.QUICK_POLICY_CAP, anytime.QUICK_POLICY_MENU, f"{e.match_seed}:{obs.turn}") in qp.calls
+    assert ("menus", anytime.QUICK_POLICY_CAP, anytime.QUICK_POLICY_MENU_TDI, f"{e.match_seed}:{obs.turn}") in qp.calls
     assert [len(x) for x in q.lists] == [3, 3]
-    assert q.info["cap"] == 48 and q.info["cap_policy"] == "policy40+gumbel8+parryx6"
+    assert q.info["cap"] == 48 and q.info["cap_policy"] == "policy40+gumbel8+parryx6+tdi8"
     assert q.info["quick_policy"] == qp.sha256
 
 
@@ -285,10 +285,16 @@ def test_on_the_full_search_warm_starts_from_the_policy_and_still_certifies():
     assert abs(prod.value - plain.production.value) < 2e-3
 
 
-def test_on_two_decision_children_search_the_policy_menus():
+def test_on_deep_stages_extend_to_stage_5_and_three_decision():
     e, obs = _toy_position()
     qp = _Recording(keep=2)
+    # Off mode stops at stage 4; on mode adds stage 5 (K=32) and stage 6 (depth-3).
+    off_stages = [s for s, _, _ in anytime.Deepener(MatrixBot(search="oracle"), obs, 1, e, Clock(0)).stages(True)]
+    on_stages = [s for s, _, _ in anytime.Deepener(MatrixBot(search="oracle"), obs, 1, e, Clock(0), quick_policy=qp).stages(True)]
+    assert max(off_stages) == 4 and 5 in on_stages and 6 in on_stages
     out = anytime.think(MatrixBot(search="oracle"), obs, 1, e, Clock(0), deep=True, quick_policy=qp)
-    child = [c for c in qp.calls if c[0] == "menus" and c[3].endswith(":depth2")]
-    assert child and all(c[1] == 48 and c[2] == anytime.QUICK_POLICY_MENU for c in child)
-    assert out.best is not None and out.best.name == "two-decision" and out.best.pairs > 0
+    d2 = [c for c in qp.calls if c[0] == "menus" and c[3].endswith(":depth2")]
+    d3 = [c for c in qp.calls if c[0] == "menus" and c[3].endswith(":depth3")]
+    assert d2 and all(c[1] == 48 and c[2] == anytime.QUICK_POLICY_MENU for c in d2)
+    assert d3 and all(c[1] == 48 and c[2] == anytime.QUICK_POLICY_MENU for c in d3)
+    assert out.best is not None and out.best.stage == 6 and out.best.name == "three-decision" and out.best.pairs > 0

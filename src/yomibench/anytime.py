@@ -93,6 +93,7 @@ from typing import Any, Callable
 from yomibench.bots import FactorExplore, MatrixBot, policy_start, preview_states, turn_candidates
 from yomibench.engine import Candidate, Engine, Observation
 from yomibench.playout import cap_candidates
+from yomibench.quick_policy import add_tdi
 from yomibench.search import double_oracle
 
 PREVIEW_CHUNK = 128  # pairs per preview request in a stoppable stage (~350 us a pair on a loaded Mac)
@@ -137,6 +138,7 @@ PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed a
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
 # With a quick policy (human_play --quick-policy): self-play's policy-picked quick menus (yomibench.quick_policy).
 QUICK_POLICY_MENU, QUICK_POLICY_CAP = "policy40+gumbel8+parryx6", 48
+QUICK_POLICY_MENU_TDI = "policy40+gumbel8+parryx6+tdi8"  # root emergency quick turn: + up to 8 DI/toggle variants per seat
 # The match settings that are the game's turn clock, not the simulation (ui/UILayer.gd and main.gd
 # read them; game.gd never does): kept for the deadline, never sent to the sim.
 TIMER_KEYS = ("timer_mode", "turn_time", "turn_min_length", "increment_starting_time", "increment_per_turn",
@@ -537,6 +539,8 @@ class Deepener:
     """The stages for one decision of `bot` (the production MatrixBot) as `seat` on `engine`."""
 
     TWO_DECISION = ((3, 4, 2), (3, 8, 2), (4, 16, 3))  # (stage, K, re-solve rounds)
+    TWO_DECISION_POLICY = ((5, 32, 3),)  # wider depth-2 when quick_policy is on
+    THREE_DECISION_POLICY = ((6, 4, 4, 2), (6, 8, 4, 2))  # (stage, root_k, child_k, rounds) when quick_policy is on
 
     def __init__(self, bot: MatrixBot, obs: Observation, seat: int, engine: Engine, clock: Clock,
                  quick_policy: Any = None):
@@ -546,8 +550,10 @@ class Deepener:
         # A pinned yomibench.quick_policy.QuickPolicy (human_play --quick-policy), or None: off (see the module doc).
         self.quick_policy = quick_policy
         self.depth2: dict[tuple[int, int], float] = {}  # (id p1, id p2) -> solved subgame value (p1's)
+        self.depth3: dict[tuple[int, int], float] = {}  # (id p1, id p2) -> depth-3 solved subgame value (p1's)
         self.leaf: dict[tuple[Any, int, int], float] = {}  # (view, i, j) -> evaluator value (p1's)
         self.unbranchable: set[tuple[int, int]] = set()
+        self.unbranchable3: set[tuple[int, int]] = set()
         self.child_previews = 0
         # The production search's best-so-far: its latest solved double-oracle round (MatrixBot.progress).
         self.partial: Answer | None = None
@@ -565,6 +571,12 @@ class Deepener:
             out.append((2, self.widen, True))
             for stage, k, rounds in self.TWO_DECISION:
                 out.append((stage, (lambda best, s=stage, k=k, r=rounds: self.two_decision(best, s, k, r)), True))
+            if self.quick_policy is not None:
+                for stage, k, rounds in self.TWO_DECISION_POLICY:
+                    out.append((stage, (lambda best, s=stage, k=k, r=rounds: self.two_decision(best, s, k, r)), True))
+                for stage, k, ck, rounds in self.THREE_DECISION_POLICY:
+                    out.append((stage, (lambda best, s=stage, k=k, ck=ck, r=rounds:
+                                        self.three_decision(best, s, k, ck, r)), True))
         return out
 
     # --- stage 0: the emergency quick search -----------------------------------------------------
@@ -584,11 +596,13 @@ class Deepener:
             cap, cap_policy = QUICK_CAP, QUICK_POLICY
             base = [cap_candidates(c, QUICK_CAP, QUICK_POLICY, f"{self.engine.match_seed}:{self.obs.turn}:{s}")
                     for s, c in enumerate(self.obs.candidates)]
-        else:  # self-play's policy-picked quick menus (salt "seed:turn", as its cheap view)
-            cap, cap_policy = QUICK_POLICY_CAP, QUICK_POLICY_MENU
+        else:  # self-play's policy-picked quick menus + DI/toggle variants (salt "seed:turn")
+            cap, cap_policy = QUICK_POLICY_CAP, QUICK_POLICY_MENU_TDI
+            salt = f"{self.engine.match_seed}:{self.obs.turn}"
             check()
-            base = qp.menus(self.obs.state, self.obs.candidates, cap, cap_policy,
-                            f"{self.engine.match_seed}:{self.obs.turn}")
+            base = qp.menus(self.obs.state, self.obs.candidates, cap, cap_policy, salt)
+            check()
+            base = add_tdi(eng, self.obs.state, base, cap_policy, salt, qp)
         shared, private = self.engine.turn_cache, {"base": base}
         self.engine.turn_cache = private
         try:
@@ -662,7 +676,7 @@ class Deepener:
             out = []
             for i, j in pairs:
                 ids = (lists[0][i].id, lists[1][j].id)
-                out.append(self.depth2.get(ids, self.leaf[(base.view, i, j)]))
+                out.append(self.depth3.get(ids, self.depth2.get(ids, self.leaf[(base.view, i, j)])))
             return out
         return evaluate
 
@@ -739,6 +753,121 @@ class Deepener:
         info = {"rounds": result.rounds, "converged": True, "depth2_pairs": pairs, "unbranchable": refused,
                 "child_previews": self.child_previews, "k": k}
         return Answer(stage, "two-decision", lists, row, col, result.value, view=base.view, pairs=pairs, info=info)
+
+    # --- stage 6: three-decision (depth-3) search when quick_policy is on --------------------
+
+    def _solve_policy_handle(self, h: Observation, seed: str, value: GuardedValue, eng: Guarded):
+        """Solve one preview handle `h` over both seats' policy menus; returns `(result, c0, c1, cache)`
+        or None if terminal/trivial/unconverged."""
+        if h.done or h.handle is None:
+            return None
+        c0, c1 = h.candidates
+        if not c0 or not c1 or len(c0) * len(c1) == 1:
+            return None
+        qp = self.quick_policy
+        assert qp is not None
+        self.clock.check_soft()
+        (c0, s0), (c1, s1) = qp.scored_menus(h.state, [c0, c1], QUICK_POLICY_CAP, QUICK_POLICY_MENU, seed,
+                                             need_scores=True)
+        start = (policy_start(s0, self.bot.oracle_start), policy_start(s1, self.bot.oracle_start))
+        cache: dict[tuple[int, int], float] = {}
+
+        def evaluate(pairs: list[tuple[int, int]]) -> list[float]:
+            missing = [p for p in dict.fromkeys(pairs) if p not in cache]
+            for k in range(0, len(missing), PREVIEW_CHUNK):
+                batch = missing[k:k + PREVIEW_CHUNK]
+                obs = [eng.continue_from(h.handle, (c0[a].id, c1[b].id), candidates=False) for a, b in batch]
+                self.child_previews += len(obs)
+                self.engine.release([o.handle for o in obs if o.handle is not None])
+                for p, v in zip(batch, value.many([o.state for o in obs])):
+                    cache[p] = v
+            return [cache[p] for p in pairs]
+
+        r = double_oracle(len(c0), len(c1), evaluate, self.bot.iterations, self.bot.tolerance, start=start)
+        return (r, c0, c1, cache) if r.converged else None
+
+    def branch_depth3(self, ids: tuple[int, int], child_k: int, value: GuardedValue, eng: Guarded) -> float | None:
+        """Depth-3 value for root pair `ids`: solve its depth-2 subgame, expand its top `child_k` support
+        pairs one more turn over policy menus, and re-solve the depth-2 subgame."""
+        (h,) = eng.preview([ids], candidates=True)
+        handles = [h.handle] if h.handle is not None else []
+        try:
+            seed2 = f"{self.engine.match_seed}:{self.obs.turn}:{ids[0]}:{ids[1]}:depth2"
+            solved = self._solve_policy_handle(h, seed2, value, eng)
+            if solved is None:
+                return None
+            r, c0, c1, cache = solved
+            ranked = sorted(((r.row[a] * r.col[b], a, b)
+                             for a in range(len(c0)) if r.row[a] > 0
+                             for b in range(len(c1)) if r.col[b] > 0),
+                            key=lambda t: (-t[0], t[1], t[2]))[:child_k]
+            d3: dict[tuple[int, int], float] = {}
+            for _, a, b in ranked:
+                h2 = eng.continue_from(h.handle, (c0[a].id, c1[b].id), candidates=True)
+                self.child_previews += 1
+                try:
+                    seed3 = f"{seed2}:{c0[a].id}:{c1[b].id}:depth3"
+                    s3 = self._solve_policy_handle(h2, seed3, value, eng)
+                    if s3 is not None:
+                        d3[(a, b)] = s3[0].value
+                finally:
+                    if h2.handle is not None:
+                        self.engine.release([h2.handle])
+            if not d3:
+                return r.value
+
+            def evaluate_up(pairs: list[tuple[int, int]]) -> list[float]:
+                missing = [p for p in dict.fromkeys(pairs) if p not in d3 and p not in cache]
+                for k in range(0, len(missing), PREVIEW_CHUNK):
+                    batch = missing[k:k + PREVIEW_CHUNK]
+                    obs = [eng.continue_from(h.handle, (c0[a].id, c1[b].id), candidates=False) for a, b in batch]
+                    self.child_previews += len(obs)
+                    self.engine.release([o.handle for o in obs if o.handle is not None])
+                    for p, v in zip(batch, value.many([o.state for o in obs])):
+                        cache[p] = v
+                return [d3.get(p, cache[p]) for p in pairs]
+
+            support = ([a for a in range(len(c0)) if r.row[a] > 0], [b for b in range(len(c1)) if r.col[b] > 0])
+            r_up = double_oracle(len(c0), len(c1), evaluate_up, self.bot.iterations, self.bot.tolerance, start=support)
+            return r_up.value if r_up.converged else r.value
+        finally:
+            if handles:
+                self.engine.release(handles)
+
+    def three_decision(self, base: Answer | None, stage: int, k: int, child_k: int, rounds: int) -> Answer | None:
+        if base is None or self.quick_policy is None:
+            return None
+        check = self.clock.check_soft
+        value = GuardedValue(self.bot.value, check, VALUE_CHUNK, self.clock.work, step=self.clock.note_step)
+        eng = Guarded(self.engine, check, work=self.clock.work, step=self.clock.note_step)
+        lists, row, col = base.lists, base.row, base.col
+        evaluate = self._leaf_values(base, value, eng)
+        n0, n1 = len(lists[0]), len(lists[1])
+        result, refused = None, 0
+        for _ in range(rounds):
+            ranked = sorted(((row[i] * col[j], i, j) for i in range(n0) if row[i] > 0 for j in range(n1) if col[j] > 0),
+                            key=lambda t: (-t[0], t[1], t[2]))[:k]
+            todo = [(lists[0][i].id, lists[1][j].id) for _, i, j in ranked]
+            todo = [ids for ids in todo if ids not in self.depth3 and ids not in self.unbranchable3]
+            if not todo and result is not None:
+                break
+            for ids in todo:
+                v = self.branch_depth3(ids, child_k, value, eng)
+                if v is None:
+                    self.unbranchable3.add(ids)
+                    refused += 1
+                else:
+                    self.depth3[ids] = v
+            support = ([i for i in range(n0) if row[i] > 0], [j for j in range(n1) if col[j] > 0])
+            result = double_oracle(n0, n1, evaluate, self.bot.iterations, self.bot.tolerance, start=support)
+            if not result.converged:
+                return None  # never store an uncertified answer
+            row, col = result.row, result.col
+        assert result is not None
+        pairs = len(self.depth3)
+        info = {"rounds": result.rounds, "converged": True, "depth3_pairs": pairs, "depth2_pairs": len(self.depth2),
+                "unbranchable": refused, "child_previews": self.child_previews, "k": k, "child_k": child_k}
+        return Answer(stage, "three-decision", lists, row, col, result.value, view=base.view, pairs=pairs, info=info)
 
 
 Stage = tuple[int, Callable[[Answer | None], "Answer | None"], bool]  # (number, stage, does a lock-in stop it)
