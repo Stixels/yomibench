@@ -5,6 +5,7 @@
   --muted: #676c79; --line: #e3e0d9; --line-2: #cfcbc2;
   --accent: #d9480f; --accent-ink: #a63a0c; --accent-soft: #fdebe0; --on-accent: #ffffff;
   --cool: #2563eb; --cool-ink: #1d4ed8; --cool-soft: #e5edfd;
+  --p1: #5a4fd0; --p2: #c4303b;  /* the game's seat colours (P1 lavender, P2 salmon), darkened to read on light */
   --win: #157f3c; --win-soft: #e2f3e8; --loss: #c0362c; --loss-soft: #fbe7e5;
   --hm-pos: #c2410c; --hm-neg: #1d4ed8; --hm-mid: #eceae4;
   --band-a: rgba(18, 19, 23, 0.025); --band-b: rgba(18, 19, 23, 0.055); --band-now: rgba(217, 72, 15, 0.07);
@@ -26,6 +27,7 @@
     --muted: #8d93a3; --line: #232731; --line-2: #333845;
     --accent: #ff7a38; --accent-ink: #ffa477; --accent-soft: #2c1910; --on-accent: #1a0b03;
     --cool: #5b9bff; --cool-ink: #8db8ff; --cool-soft: #111c31;
+    --p1: #aa9fff; --p2: #ff777f;  /* the in-game fighter colours */
     --win: #46d17e; --win-soft: #10291b; --loss: #ff6b5e; --loss-soft: #33130f;
     --hm-pos: #e0601f; --hm-neg: #3b7bf0; --hm-mid: #262a33;
     --band-a: rgba(255, 255, 255, 0.02); --band-b: rgba(255, 255, 255, 0.045); --band-now: rgba(255, 122, 56, 0.08);
@@ -39,6 +41,7 @@
   --muted: #8d93a3; --line: #232731; --line-2: #333845;
   --accent: #ff7a38; --accent-ink: #ffa477; --accent-soft: #2c1910; --on-accent: #1a0b03;
   --cool: #5b9bff; --cool-ink: #8db8ff; --cool-soft: #111c31;
+  --p1: #aa9fff; --p2: #ff777f;
   --win: #46d17e; --win-soft: #10291b; --loss: #ff6b5e; --loss-soft: #33130f;
   --hm-pos: #e0601f; --hm-neg: #3b7bf0; --hm-mid: #262a33;
   --band-a: rgba(255, 255, 255, 0.02); --band-b: rgba(255, 255, 255, 0.045); --band-now: rgba(255, 122, 56, 0.08);
@@ -161,8 +164,8 @@ section { display: flex; flex-direction: column; gap: var(--s4); }
 .herovid figcaption { display: flex; flex-direction: column; gap: 6px; }
 .vsline { display: flex; align-items: baseline; gap: 10px; font: 700 var(--fs-lg)/1.1 var(--display); }
 .vsline small { font: 500 var(--fs-sm) var(--body); color: var(--muted); }
-.vsline .me { color: var(--accent); }
-.vsline .them { color: var(--cool-ink); }
+.vsline .p1, .fight .p1 { color: var(--p1); }  /* each side in its seat's fighter colour, P1 (left) first */
+.vsline .p2, .fight .p2 { color: var(--p2); }
 .vsline .vs, .fight .vs { font: 600 var(--fs-xs) var(--mono); color: var(--muted); text-transform: uppercase; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { font-size: var(--fs-xs); padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-2); }
@@ -337,9 +340,7 @@ details .rgrid { margin-top: var(--s3); }
 .slot { font: 500 0.68rem var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 .moment { font: 700 var(--fs-md)/1.2 var(--display); }
 .fight { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: var(--fs-sm); }
-.fight .me { color: var(--accent-ink); }
-.fight .me b { font-family: var(--display); }
-.fight .them { color: var(--cool-ink); }
+.fight b { font-family: var(--display); }
 .meta { font-size: var(--fs-xs); color: var(--muted); }
 .meta a { color: var(--muted); }
 .res { flex: none; font: 600 0.66rem var(--mono); text-transform: uppercase; letter-spacing: 0.05em; padding: 3px 8px; border-radius: 999px; }
