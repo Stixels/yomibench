@@ -1218,6 +1218,7 @@ func _card_text(t, i):
 	card_title.text = t
 	card_info.text = i
 	rematch_btn.disabled = not result_in
+	card.rect_size = Vector2.ZERO
 	if card.visible and not rematch_btn.disabled:
 		rematch_btn.grab_focus()
 
@@ -1522,7 +1523,7 @@ func _make_card(theme):
 	card = PanelContainer.new()
 	if theme:
 		card.theme = theme
-	card.rect_position = Vector2(150, 228)
+	card.rect_position = Vector2(150, 214)
 	card.rect_min_size = Vector2(340, 0)
 	layer.add_child(card)
 	var box = VBoxContainer.new()
@@ -1574,7 +1575,7 @@ func _make_card(theme):
 	if theme:
 		reveal_btn.theme = theme
 	reveal_btn.text = "Show menu (H)"
-	reveal_btn.rect_position = Vector2(510, 324)
+	reveal_btn.rect_position = Vector2(548, 336)
 	reveal_btn.connect("pressed", self, "_on_reveal_card_pressed")
 	reveal_btn.hide()
 	layer.add_child(reveal_btn)
