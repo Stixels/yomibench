@@ -11,9 +11,9 @@ payoff table, and learns to judge positions from games it plays against itself. 
 the previous best in a test whose rule is fixed before any game, before it's promoted.
 
 - **Leaderboard and videos:** [stixels.github.io/yomibench](https://stixels.github.io/yomibench/): the Arena, every
-  HustleBot generation (HustleBot g13 and so on), its rating, and replays of its games.
-- **Play against it:** an in-game mod that adds **Multiplayer (vs bot)** to the game's menu, on Windows, with
-  HustleBot g12. Step by step: [stixels.github.io/yomibench/play](https://stixels.github.io/yomibench/play/).
+  HustleBot generation, its rating, and replays of its games.
+- **Play against it:** an in-game mod that adds **Multiplayer (vs bot)** to the game's menu, on Windows. Step by step:
+  [stixels.github.io/yomibench/play](https://stixels.github.io/yomibench/play/).
 
 ## What's in the box
 

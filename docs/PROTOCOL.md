@@ -82,7 +82,7 @@ a seat on 5 plays the server's set-5 switches, `hello.set5`).
 their lists; `tools/candidates_replay.py` checks that an engine reproduces a record's lists, using
 only `new_match`, `expand` and `step` (one command per decision).
 
-Engine-specific extras (not required): `step_raw` (engines that can follow a recorded game: `inputs: [{action, data, extra}, {...}]`, each seat's exact input played as given, on or off the candidate grid, answered like `step`; YOMI refuses inputs a player could not have sent, see `mod/YomiBench/README.md` "Raw inputs"), `save_replay` (YOMI: the match so far as a game replay
+Engine-specific extras (not required): `step_raw` (engines that can follow a recorded game: `inputs: [{action, data, extra}, {...}]`, each seat's exact input played as given, on or off the candidate grid, answered like `step`; YOMI refuses inputs a player could not have sent), `save_replay` (YOMI: the match so far as a game replay
 file; with no `path`, its bytes come back as `replay_b64`). `detail: true` on `observe`/`step`/`preview`/`continue`
 adds a fuller `detail` snapshot; YOMI also has `stats` (timing and preview-vs-step divergence
 counters) and test/debug commands (`moves`, `probe`, `deep_diff`, `trace: true`; see
