@@ -23,6 +23,8 @@ extends Node
 const NAME = "YomiBenchVsBot"
 const HUMAN = preload("res://YomiBenchVsBot/YomiHuman.gd")
 const CONFIG = "user://yomibench_vsbot.json"
+const LOG_PATH = "user://yomibench_vsbot.log"
+const LOG_MAX_BYTES = 1048576  # rotate to .old once the log exceeds 1 MiB
 const CLIENT_DIR = "user://yomibench-mp-client"
 const CLIENT_SCRIPTS = ["MpClient.gd", "MpLink.gd", "YomiHuman.gd", "SteamStub.gd"]
 const LINK = preload("res://YomiBenchVsBot/MpLink.gd")
@@ -71,6 +73,7 @@ var prep_msec = 0
 var prep_max_frame_ms = 0  # the longest frame during the setup (the log says it: the game kept drawing)
 var server_cmd = {}     # _server_command()'s answer from the setup (the hidden-desktop launcher reuses it)
 var log_lock = Mutex.new()  # _log runs on the setup thread too
+var log_checked = false     # rotate LOG_PATH once per session if it grew past LOG_MAX_BYTES
 
 
 static func instance(tree):
@@ -165,6 +168,18 @@ func _on_prepared():
 	_log("setup took %.1f s (longest frame meanwhile: %d ms)" % [(OS.get_ticks_msec() - prep_msec) / 1000.0, prep_max_frame_ms])
 	if not leaving and not failed:
 		_start_session(r)
+
+
+func _prep_progress(text):
+	if prep_thread != null:
+		call_deferred("_on_prep_progress", text)
+	else:
+		_on_prep_progress(text)
+
+
+func _on_prep_progress(text):
+	if not leaving and not failed and waiting and human != null and human.server.empty():
+		human.show_wait("YomiBench: setting up the bot...", text)
 
 
 # Waits for the setup thread (asking it to stop at the next file): before this node goes, or the game quits.
@@ -606,6 +621,7 @@ func _client_run_dir():
 			continue  # e.g. a build with its pack inside the exe
 		if f.file_exists(b) and f.get_modified_time(a) <= f.get_modified_time(b) and _size(a) == _size(b):
 			continue
+		_prep_progress("Preparing the bot's copy of the game (%s)..." % n)
 		if d.copy(a, b) != OK:
 			_log("couldn't copy %s" % a)
 			return ""
@@ -709,12 +725,16 @@ func _bundled_server():
 		return ProjectSettings.globalize_path(exe)
 	var t0 = OS.get_ticks_msec()
 	var d = Directory.new()
+	var total = man.files.size()
+	var idx = 0
 	for e in man.files:
 		if prep_abort:
 			return ""
+		idx += 1
 		var target = dest.plus_file(e.path)
 		if f.file_exists(target) and f.get_sha256(target) == e.sha256:
 			continue
+		_prep_progress("Extracting the bot server (%d/%d)..." % [idx, total])
 		d.make_dir_recursive(target.get_base_dir())
 		if not _copy(BUNDLE.plus_file(e.path), target) or f.get_sha256(target) != e.sha256:
 			_log("bundled server: %s failed its sha256 check after copying" % e.path)
@@ -789,8 +809,14 @@ func _free_port():
 func _log(text):
 	log_lock.lock()
 	var f = File.new()
-	var mode = File.READ_WRITE if f.file_exists("user://yomibench_vsbot.log") else File.WRITE
-	if f.open("user://yomibench_vsbot.log", mode) == OK:
+	if not log_checked:
+		log_checked = true
+		if f.file_exists(LOG_PATH) and _size(LOG_PATH) > LOG_MAX_BYTES:
+			var d = Directory.new()
+			d.remove(LOG_PATH + ".old")
+			d.rename(LOG_PATH, LOG_PATH + ".old")
+	var mode = File.READ_WRITE if f.file_exists(LOG_PATH) else File.WRITE
+	if f.open(LOG_PATH, mode) == OK:
 		f.seek_end()
 		f.store_line("%s %s" % [OS.get_datetime_from_unix_time(OS.get_unix_time()), text])
 		f.close()

@@ -106,12 +106,18 @@ var title = null
 var info = null
 var p1_opt = null
 var p2_opt = null
+var swap_btn = null
 var pick_opt = null
 var settings_opt = null
 var presets = {"standard": {}}  # the server's settings presets (name -> overrides of the standard settings)
 var preset_names = ["standard"]
 var estimate_box = null
 var start_btn = null
+const PREFS = "user://yomibench_prefs.json"
+const RANDOM_CHAR = "Random"
+var session_wins = 0
+var session_losses = 0
+var session_draws = 0
 var pick_styles = ["mixed", "strongest"]
 var estimate = null      # the bot's win estimate from this decision's pick, shown once the turn is played
 var shown_estimate = null
@@ -154,6 +160,8 @@ var card = null          # the result card (Rematch / Change settings / Main men
 var card_title = null
 var card_info = null
 var rematch_btn = null
+var reveal_btn = null    # shown while the result card is hidden to watch the post-game replay
+var card_hidden = false
 var result_in = false    # the bot's record of the finished match arrived (Rematch waits for it)
 var ended_msec = 0       # when the match ended: the card waits a moment so the final hit stays visible
 const CARD_DELAY_MS = 1500
@@ -416,6 +424,9 @@ func _on_hello(r):
 		timer_box.pressed = _timer_default(str(preset_names[max(0, settings_opt.selected)]))
 		# with the turn timer on the bot uses its clock: it deepens until you lock in or its deadline
 		think_box.pressed = bool(opts.get("think_until_lockin", false)) or timer_box.pressed
+	if not autoplay:
+		_apply_prefs()
+	_update_timer_label()
 	if autoplay:
 		_next_or_quit(r.get("next"))
 	elif was_crashed:  # the launcher restarted the bot after a crash
@@ -426,9 +437,17 @@ func _on_hello(r):
 
 
 func _panel_title():
-	if side == "host":
-		return "You vs %s (local)" % bot_name()
-	return "You vs %s" % bot_name()
+	var t = "You vs %s (local)" % bot_name() if side == "host" else "You vs %s" % bot_name()
+	var score = _session_score_text()
+	return t + "  |  " + score if score != "" else t
+
+
+func _session_score_text():
+	if session_wins + session_losses + session_draws == 0:
+		return ""
+	if session_draws > 0:
+		return "Session: %dW - %dL - %dD" % [session_wins, session_losses, session_draws]
+	return "Session: %dW - %dL" % [session_wins, session_losses]
 
 
 # The bot's name for the player: a promoted generation's label ("r3-g14", as the records keep it) as the site and
@@ -480,8 +499,10 @@ func _on_start_pressed():
 	var ready = connected if side == "single" else not server.empty()
 	if phase == "playing" or phase == "starting" or not ready:
 		return
+	if not autoplay:
+		_save_prefs()
 	randomize()
-	_start_match(characters[p1_opt.selected], characters[p2_opt.selected], randi())
+	_start_match(_resolve_char(p1_opt), _resolve_char(p2_opt), randi())
 
 
 func _start_match(p1, p2, seed_):
@@ -571,11 +592,14 @@ func _launch(msg):
 	forfeiter = 0
 	result_in = false
 	ended_msec = 0
+	card_hidden = false
 	phase = "starting"
 	if panel:
 		panel.hide()
 	if card:
 		card.hide()
+	if reveal_btn:
+		reveal_btn.hide()
 	main._on_match_ready(data)
 
 
@@ -643,14 +667,34 @@ func _on_rematch_pressed():
 
 
 func _on_change_settings_pressed():
+	card_hidden = false
 	if card:
 		card.hide()
+	if reveal_btn:
+		reveal_btn.hide()
 	_show_panel(_panel_title(), "")
+
+
+func _on_swap_pressed():
+	if p1_opt == null or p2_opt == null:
+		return
+	var a = p1_opt.selected
+	p1_opt.select(p2_opt.selected)
+	p2_opt.select(a)
 
 
 func _on_preset_selected(i):
 	timer_box.pressed = str(presets.get(str(preset_names[max(0, i)]), {}).get("timer_mode", "none")) != "none"
 	think_box.pressed = timer_box.pressed  # on the clock, the bot thinks until you lock in (or its deadline)
+	_update_timer_label()
+
+
+func _update_timer_label():
+	if timer_box == null or settings_opt == null or preset_names.empty():
+		return
+	var name = str(preset_names[max(0, settings_opt.selected)])
+	var has_clock = str(presets.get(name, {}).get("timer_mode", "none")) != "none"
+	timer_box.text = "Turn timer (ranked clock)" if has_clock else "Turn timer (per-turn)"
 
 
 func _on_match_started(r):
@@ -1150,13 +1194,21 @@ func _show_result(r):
 		_card_text("Game over", "The bot couldn't save this game: %s" % str(r.get("message")))
 		_card_now()
 		return
-	var res = {"human": "You win!", "bot": _bot_wins(), "draw": "Draw."}.get(r.get("result"), str(r.get("result")))
+	var outcome = str(r.get("result", ""))
+	if outcome == "human":
+		session_wins += 1
+	elif outcome == "bot":
+		session_losses += 1
+	elif outcome == "draw":
+		session_draws += 1
+	var res = {"human": "You win!", "bot": _bot_wins(), "draw": "Draw."}.get(outcome, outcome)
 	var t = "Game over. %s (%d turns)" % [res, int(r.get("turns", 0))]
 	if typeof(r.get("forfeit")) in [TYPE_INT, TYPE_REAL] or forfeiter != 0:
 		t = _forfeit_text()
 	var saved = ("Saved to Documents\\YomiBench (it counts for the bot's stats)." if r.get("valid", false) else
 		"Saved to Documents\\YomiBench, marked invalid: the bot's simulation lost track of the match.")
-	_card_text(t, saved)
+	var score = _session_score_text()
+	_card_text(t, saved + ("\n" + score if score != "" else ""))
 	_card_now()
 
 
@@ -1166,6 +1218,8 @@ func _card_text(t, i):
 	card_title.text = t
 	card_info.text = i
 	rematch_btn.disabled = not result_in
+	if card.visible and not rematch_btn.disabled:
+		rematch_btn.grab_focus()
 
 
 # Show the card now, unless it is still waiting out its delay after the match ended (then _process shows it).
@@ -1180,16 +1234,53 @@ func _show_card():
 	if panel and panel.visible:  # "Change settings" was pressed: the panel stays, with the result on it
 		info.text = card_title.text + "\n" + card_info.text
 		return
+	if card_hidden:
+		if reveal_btn:
+			reveal_btn.show()
+		return
 	rematch_btn.disabled = not result_in
+	if reveal_btn:
+		reveal_btn.hide()
 	card.show()
+	if not rematch_btn.disabled:
+		rematch_btn.grab_focus()
+
+
+func _on_hide_card_pressed():
+	if card == null:
+		return
+	card_hidden = true
+	card.hide()
+	if reveal_btn:
+		reveal_btn.show()
+
+
+func _on_reveal_card_pressed():
+	card_hidden = false
+	if reveal_btn:
+		reveal_btn.hide()
+	_show_card()
 
 
 # The game's in-match replay ("playback", R) rebuilds the match from its replay, and "edit_replay"
 # cuts the match at a replayed tick and plays on from there: the real match would leave the sim
 # behind. Both are swallowed while one of our matches is on (autoloads see input first).
+# Post-game (idle): H toggles the result card so the player can watch the post-game replay unobstructed.
 func _input(event):
 	if (phase == "playing" or phase == "ended") and (event.is_action_pressed("playback") or event.is_action_pressed("edit_replay")):
 		get_tree().set_input_as_handled()
+		return
+	if phase == "idle" and not autoplay and not crashed and card != null and (panel == null or not panel.visible):
+		if event is InputEventKey and event.pressed and not event.echo and event.scancode == KEY_H:
+			var foc = card.get_focus_owner()
+			if foc is LineEdit or foc is TextEdit:
+				return
+			if card.visible:
+				_on_hide_card_pressed()
+				get_tree().set_input_as_handled()
+			elif card_hidden:
+				_on_reveal_card_pressed()
+				get_tree().set_input_as_handled()
 
 
 func _notification(what):
@@ -1348,11 +1439,18 @@ func _make_overlay():
 	l1.text = "You (P1):"
 	row.add_child(l1)
 	p1_opt = OptionButton.new()
+	p1_opt.hint_tooltip = "Your fighter (or Random to pick a random fighter each match)."
 	row.add_child(p1_opt)
+	swap_btn = Button.new()
+	swap_btn.text = "Swap"
+	swap_btn.hint_tooltip = "Swap your fighter and the bot's fighter."
+	swap_btn.connect("pressed", self, "_on_swap_pressed")
+	row.add_child(swap_btn)
 	var l2 = Label.new()
-	l2.text = "  Bot (P2):"
+	l2.text = " Bot (P2):"
 	row.add_child(l2)
 	p2_opt = OptionButton.new()
+	p2_opt.hint_tooltip = "The bot's fighter (or Random to pick a random fighter each match)."
 	row.add_child(p2_opt)
 	_fill_characters(characters)
 	var row3 = HBoxContainer.new()
@@ -1361,6 +1459,7 @@ func _make_overlay():
 	l4.text = "Settings:"
 	row3.add_child(l4)
 	settings_opt = OptionButton.new()
+	settings_opt.hint_tooltip = "ranked: 1200-wide stage, ceiling at 500, 1.5 starting meter, 15m chess clock. standard: default online lobby rules."
 	for n in preset_names:
 		settings_opt.add_item(n)
 	row3.add_child(settings_opt)
@@ -1370,19 +1469,23 @@ func _make_overlay():
 	l3.text = "Bot style:"
 	row2.add_child(l3)
 	pick_opt = OptionButton.new()
+	pick_opt.hint_tooltip = "unpredictable: samples the bot's mixed strategy so it can't be read. strongest: plays its top move (Burst stays mixed)."
 	pick_opt.add_item("unpredictable (mixes its moves; recommended)")  # pick "mixed": samples its strategy
 	pick_opt.add_item("strongest move only")              # pick "strongest": its most likely move (Burst still mixed)
 	row2.add_child(pick_opt)
 	estimate_box = CheckBox.new()
 	estimate_box.text = "Show the bot's win estimate"
+	estimate_box.hint_tooltip = "Show the bot's estimated win probability from the previous turn in the bottom bar."
 	box.add_child(estimate_box)
 	think_box = CheckBox.new()
 	# think_until_lockin: the bot keeps searching while you decide (untimed it still answers within lock_cap_s of
 	# your lock-in; on the clock, within its own time)
 	think_box.text = "Bot uses your thinking time"
+	think_box.hint_tooltip = "Let the bot keep deepening its search while you think (answers promptly once you lock in)."
 	box.add_child(think_box)
 	timer_box = CheckBox.new()
 	timer_box.text = "Turn timer (ranked clock)"
+	timer_box.hint_tooltip = "Use the game's turn timer (ranked: 15-minute chess clock, 15 s floor; standard: per-turn timer)."
 	timer_box.pressed = _timer_default(str(preset_names[0]))
 	box.add_child(timer_box)
 	settings_opt.connect("item_selected", self, "_on_preset_selected")
@@ -1448,15 +1551,37 @@ func _make_card(theme):
 		menu_btn.rect_min_size = Vector2(96, 0)
 		menu_btn.connect("pressed", self, "_on_back_pressed")
 		row.add_child(menu_btn)
+	var row2 = HBoxContainer.new()
+	row2.alignment = BoxContainer.ALIGN_CENTER
+	row2.add_constant_override("separation", 10)
+	box.add_child(row2)
+	var hide_btn = Button.new()
+	hide_btn.text = "Watch replay (H)"
+	hide_btn.hint_tooltip = "Hide this card to watch the post-game replay (press H to bring it back)."
+	hide_btn.connect("pressed", self, "_on_hide_card_pressed")
+	row2.add_child(hide_btn)
+	var games_btn = Button.new()
+	games_btn.text = "Open games folder"
+	games_btn.hint_tooltip = "Open the folder where your saved bot match logs are stored."
+	games_btn.connect("pressed", self, "_on_games_folder_pressed")
+	row2.add_child(games_btn)
 	card_info = Label.new()
 	card_info.autowrap = true
 	card_info.align = Label.ALIGN_CENTER
 	box.add_child(card_info)
 	card.hide()
+	reveal_btn = Button.new()
+	if theme:
+		reveal_btn.theme = theme
+	reveal_btn.text = "Show menu (H)"
+	reveal_btn.rect_position = Vector2(510, 324)
+	reveal_btn.connect("pressed", self, "_on_reveal_card_pressed")
+	reveal_btn.hide()
+	layer.add_child(reveal_btn)
 
 
 func _set_controls(on):
-	for c in [p1_opt, p2_opt, settings_opt, pick_opt, estimate_box, think_box, timer_box, start_btn]:
+	for c in [p1_opt, p2_opt, swap_btn, settings_opt, pick_opt, estimate_box, think_box, timer_box, start_btn]:
 		if c != null:
 			c.disabled = not on
 
@@ -1480,12 +1605,36 @@ func _on_log_pressed():
 		OS.shell_open(f.get_base_dir())
 
 
+func _games_dir():
+	var f = File.new()
+	if f.file_exists("user://yomibench_vsbot.json") and f.open("user://yomibench_vsbot.json", File.READ) == OK:
+		var cfg = parse_json(f.get_as_text())
+		f.close()
+		if typeof(cfg) == TYPE_DICTIONARY and str(cfg.get("out", "")) != "":
+			return str(cfg.out)
+	var docs = OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	if docs != "":
+		var out = docs.plus_file("YomiBench").plus_file("games-root")
+		if Directory.new().dir_exists(out):
+			return out
+		return docs.plus_file("YomiBench")
+	return ProjectSettings.globalize_path("user://yomibench-games")
+
+
+func _on_games_folder_pressed():
+	var d = _games_dir()
+	if d != "":
+		Directory.new().make_dir_recursive(d)
+		OS.shell_open(d)
+
+
 # The bot server went away (it crashed, or something ended it): say so, on top of the match. Single: the lost
 # connection; host: the client's report, its leaving, or the server's status file going stale (VsBot.gd).
 func bot_crashed(text = ""):
 	if crashed:
 		return
 	crashed = true
+	card_hidden = false
 	if text == "":
 		text = crash_text()
 	print("YOMIHUMAN_CRASH ", text)
@@ -1504,6 +1653,8 @@ func bot_crashed(text = ""):
 		log_btn.show()
 		if card:
 			card.hide()
+		if reveal_btn:
+			reveal_btn.hide()
 		panel.show()
 	# The match can't go on: the player's own action panel greyed and out of reach.
 	if side == "host" and is_instance_valid(p1_panel):  # (single: the launcher restarts the bot in the same game)
@@ -1529,12 +1680,12 @@ func _on_back_pressed():
 	emit_signal("leave_requested")
 
 
-# The character pickers: `names` in order, keeping each picker's choice if it's still offered (else
-# the launcher's --yomi-human-p1/p2, else the first).
+# The character pickers: `names` in order plus Random at the end, keeping each picker's choice if it's still offered
+# (else the launcher's --yomi-human-p1/p2, else the first).
 func _fill_characters(names):
 	var keep = [_option("human-p1", "Ninja"), _option("human-p2", "Ninja")]
 	if p1_opt.get_item_count() > 0 and p1_opt.selected >= 0 and p2_opt.selected >= 0:
-		keep = [characters[p1_opt.selected], characters[p2_opt.selected]]
+		keep = [_selected_char_label(p1_opt), _selected_char_label(p2_opt)]
 	characters = []
 	for c in names:
 		characters.append(str(c))
@@ -1543,7 +1694,81 @@ func _fill_characters(names):
 		opt.clear()
 		for c in characters:
 			opt.add_item(c)
-		opt.select(max(0, characters.find(keep[k])))
+		opt.add_item(RANDOM_CHAR)
+		_select_char_label(opt, keep[k])
+
+
+func _selected_char_label(opt):
+	if opt == null or opt.selected < 0 or opt.selected >= opt.get_item_count():
+		return characters[0] if not characters.empty() else "Ninja"
+	return opt.get_item_text(opt.selected)
+
+
+func _select_char_label(opt, label):
+	if opt == null:
+		return
+	if str(label) == RANDOM_CHAR:
+		opt.select(characters.size())
+		return
+	opt.select(max(0, characters.find(str(label))))
+
+
+func _resolve_char(opt):
+	var label = _selected_char_label(opt)
+	if label == RANDOM_CHAR and not characters.empty():
+		return characters[rng.randi() % characters.size()]
+	return label
+
+
+func _load_prefs():
+	var f = File.new()
+	if not f.file_exists(PREFS) or f.open(PREFS, File.READ) != OK:
+		return {}
+	var r = JSON.parse(f.get_as_text())
+	f.close()
+	return r.result if r.error == OK and typeof(r.result) == TYPE_DICTIONARY else {}
+
+
+func _save_prefs():
+	if p1_opt == null or settings_opt == null or preset_names.empty():
+		return
+	var data = {
+		"p1": _selected_char_label(p1_opt),
+		"p2": _selected_char_label(p2_opt),
+		"settings": str(preset_names[max(0, settings_opt.selected)]),
+		"pick": pick_styles[max(0, pick_opt.selected)],
+		"show_estimate": estimate_box.pressed,
+		"think_until_lockin": think_box.pressed,
+		"turn_timer": timer_box.pressed,
+	}
+	var f = File.new()
+	if f.open(PREFS, File.WRITE) == OK:
+		f.store_string(JSON.print(data))
+		f.close()
+
+
+func _apply_prefs():
+	var p = _load_prefs()
+	if p.empty():
+		return
+	if _option("human-p1", "") == "" and p.has("p1"):
+		_select_char_label(p1_opt, str(p.p1))
+	if _option("human-p2", "") == "" and p.has("p2"):
+		_select_char_label(p2_opt, str(p.p2))
+	if p.has("settings"):
+		var idx = preset_names.find(str(p.settings))
+		if idx >= 0:
+			settings_opt.select(idx)
+	if p.has("pick"):
+		var pidx = pick_styles.find(str(p.pick))
+		if pidx >= 0:
+			pick_opt.select(pidx)
+	if typeof(p.get("show_estimate")) == TYPE_BOOL:
+		estimate_box.pressed = p.show_estimate
+	if typeof(p.get("turn_timer")) == TYPE_BOOL:
+		timer_box.pressed = p.turn_timer
+	if typeof(p.get("think_until_lockin")) == TYPE_BOOL:
+		think_box.pressed = p.think_until_lockin
 
 
 func _show_panel(t, i):
@@ -1552,6 +1777,8 @@ func _show_panel(t, i):
 	title.text = t
 	info.text = i
 	panel.show()
+	if start_btn != null and not start_btn.disabled:
+		start_btn.grab_focus()
 
 
 func _say(t):
@@ -1585,7 +1812,7 @@ func _update_status():
 		if pick_pending and is_instance_valid(game) and not game.p1.state_interruptable:
 			r.append("bot: thinking...")
 		if shown_estimate != null:
-			r.append("est. %d%% for the bot" % int(shown_estimate))
+			r.append("bot win est. %d%%" % int(shown_estimate))
 		if _deep_label(depth_text) != "":
 			r.append(_deep_label(depth_text))
 	status.text = s
@@ -1607,7 +1834,7 @@ func _update_host_status():
 		if b != "":
 			r.append(b)
 		if remote_status.get("estimate") != null:
-			r.append("est. %d%%" % int(remote_status.estimate))
+			r.append("bot win est. %d%%" % int(remote_status.estimate))
 		if _deep_label(str(remote_status.get("depth", ""))) != "":
 			r.append(_deep_label(str(remote_status.depth)))
 	status.text = s
@@ -1644,6 +1871,9 @@ func _pause_menu_frame():
 			if c != null and c.visible:
 				c.hide()
 				pause_hid.append(c)
+		if reveal_btn != null and reveal_btn.visible:
+			reveal_btn.hide()
+			pause_hid.append(reveal_btn)
 	elif not open and not pause_hid.empty():
 		for c in pause_hid:
 			if is_instance_valid(c):
@@ -1660,6 +1890,8 @@ func _status_room():
 	if panel != null and panel.visible:
 		return false
 	if card != null and card.visible:
+		return false
+	if reveal_btn != null and reveal_btn.visible:
 		return false
 	var m = get_tree().current_scene
 	if m == null or not m.has_method("_on_match_ready"):
