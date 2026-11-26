@@ -159,8 +159,13 @@ class MatrixBot:
                 kept, pinfo = self.policy.keep(obs, cands, f"{match}:{obs.turn}:{obs.state.get('tick')}",
                                                self.policy.prune_seats(seat))
 
+            base_known: dict[tuple[int, int], float] = {}
+
             def sub_pairs(pairs):
-                return evaluate_pairs([(kept[0][i], kept[1][j]) for i, j in pairs])
+                v_pairs = [(kept[0][i], kept[1][j]) for i, j in pairs]
+                vals = evaluate_pairs(v_pairs)
+                base_known.update(zip(v_pairs, vals))
+                return vals
 
             def full(strat, s):
                 out = [0.0] * len(cands[s])
@@ -260,6 +265,8 @@ class MatrixBot:
                     pinfo.update(self.audit(obs, engine, view, result))
                 info["policy"] = pinfo
             engine.turn_cache["oracle"] = info
+            engine.turn_cache[(key, "oracle")] = info
+            engine.turn_cache[(key, "known")] = base_known
         # `replies` is shared, so the next bot's search overwrites it; keep this bot's (see `decision`).
         engine.turn_cache[(key, "replies")] = engine.turn_cache.get("replies")
         engine.turn_cache[key] = result
