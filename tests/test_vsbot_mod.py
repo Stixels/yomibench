@@ -229,3 +229,43 @@ def test_the_bottom_bar_names_the_net_by_its_short_sha256():
     client = (MOD / "MpClient.gd").read_text()
     assert 'const BOT_JOIN_NAME = "YomiBench bot"' in human and '"YomiBench bot")' in client  # the same name both ends
     assert "_name_the_bot()" in _func(human, "func _on_hello(r):")
+
+
+def test_qol_prefs_random_swap_tooltips_and_replay_hide():
+    human = HUMAN.read_text()
+    vsbot = (MOD / "VsBot.gd").read_text()
+    # Prefs saved on Start and applied on hello (only when not autoplay)
+    assert 'const PREFS = "user://yomibench_prefs.json"' in human
+    assert "_save_prefs()" in _func(human, "func _on_start_pressed():")
+    assert "_apply_prefs()" in _func(human, "func _on_hello(r):")
+    # Random character + Swap button
+    assert 'const RANDOM_CHAR = "Random"' in human
+    assert "opt.add_item(RANDOM_CHAR)" in _func(human, "func _fill_characters(names):")
+    assert "_resolve_char(p1_opt)" in _func(human, "func _on_start_pressed():")
+    assert 'swap_btn.text = "Swap"' in _func(human, "func _make_overlay():")
+    assert "swap_btn" in _func(human, "func _set_controls(on):")
+    # Clear win-estimate label on both sides and dynamic timer checkbox label
+    assert '"bot win est. %d%%"' in _func(human, "func _update_status():")
+    assert '"bot win est. %d%%"' in _func(human, "func _update_host_status():")
+    assert '"Turn timer (per-turn)"' in _func(human, "func _update_timer_label():")
+    assert "_update_timer_label()" in _func(human, "func _on_preset_selected(i):")
+    # Tooltips on panel options
+    overlay = _func(human, "func _make_overlay():")
+    for ctrl in ("p1_opt", "p2_opt", "swap_btn", "settings_opt", "pick_opt", "estimate_box", "think_box", "timer_box"):
+        assert f"{ctrl}.hint_tooltip =" in overlay, ctrl
+    # Session W-L-D tally on result card and panel title
+    assert "session_wins" in _func(human, "func _show_result(r):")
+    assert "_session_score_text()" in _func(human, "func _panel_title():")
+    assert "_session_score_text()" in _func(human, "func _show_result(r):")
+    # Watch replay hide/reveal + Open games folder + keyboard focus
+    card = _func(human, "func _make_card(theme):")
+    assert '"Watch replay (H)"' in card and '"Open games folder"' in card and '"Show menu (H)"' in card
+    assert "KEY_H" in _func(human, "func _input(event):")
+    assert "reveal_btn" in _func(human, "func _pause_menu_frame():")
+    assert "reveal_btn.visible" in _func(human, "func _status_room():")
+    assert "start_btn.grab_focus()" in _func(human, "func _show_panel(t, i):")
+    assert "rematch_btn.grab_focus()" in _func(human, "func _show_card():")
+    # VsBot.gd: live extraction progress + log rotation
+    assert "Extracting the bot server (%d/%d)..." in _func(vsbot, "func _bundled_server():")
+    assert "Preparing the bot's copy of the game (%s)..." in _func(vsbot, "func _client_run_dir():")
+    assert "const LOG_MAX_BYTES = 1048576" in vsbot and 'LOG_PATH + ".old"' in _func(vsbot, "func _log(text):")
