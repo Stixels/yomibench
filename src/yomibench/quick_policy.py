@@ -45,7 +45,9 @@ import numpy as np
 QUICK_POLICIES = ("policy40+gumbel8", "policy40+gumbel8+parryx6",
                   # quick-toggles-di: + up to B policy-picked DI/feint/reverse/extra_set variants (add_tdi)
                   "policy40+gumbel8+tdi8", "policy40+gumbel8+parryx6+tdi8",
-                  "policy40+gumbel8+tdi4", "policy40+gumbel8+parryx6+tdi4")
+                  "policy40+gumbel8+tdi4", "policy40+gumbel8+parryx6+tdi4",
+                  # emergency quick fallback (cap 32, matches options-shuffle's 32x32 speed budget)
+                  "policy24+gumbel8", "policy24+gumbel8+tdi8")
 _NAME = re.compile(r"^policy(\d+)\+gumbel(\d+)(?:\+parryx(\d+))?(?:\+tdi\d+)?$")
 TDI_SUFFIX = "+tdi"
 TDI_MOVES = 8  # the M kept menu candidates (highest policy score) whose one-factor variants form the pool
