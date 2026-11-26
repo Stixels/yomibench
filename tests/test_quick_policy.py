@@ -264,9 +264,10 @@ def test_on_the_quick_turn_searches_the_policy_menus():
     e, obs = _toy_position()
     qp = _Recording(keep=3)
     q = anytime.Deepener(MatrixBot(search="oracle"), obs, 1, e, Clock(0), quick_policy=qp).quick()
-    assert ("menus", anytime.QUICK_POLICY_CAP, anytime.QUICK_POLICY_MENU_TDI, f"{e.match_seed}:{obs.turn}") in qp.calls
+    assert ("menus", anytime.QUICK_POLICY_EMERGENCY_CAP, anytime.QUICK_POLICY_EMERGENCY_MENU,
+            f"{e.match_seed}:{obs.turn}") in qp.calls
     assert [len(x) for x in q.lists] == [3, 3]
-    assert q.info["cap"] == 48 and q.info["cap_policy"] == "policy40+gumbel8+parryx6+tdi8"
+    assert q.info["cap"] == 32 and q.info["cap_policy"] == "policy24+gumbel8+tdi8"
     assert q.info["quick_policy"] == qp.sha256
 
 

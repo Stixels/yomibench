@@ -138,7 +138,9 @@ PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed a
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
 # With a quick policy (human_play --quick-policy): self-play's policy-picked quick menus (yomibench.quick_policy).
 QUICK_POLICY_MENU, QUICK_POLICY_CAP = "policy40+gumbel8+parryx6", 48
-QUICK_POLICY_MENU_TDI = "policy40+gumbel8+parryx6+tdi8"  # root emergency quick turn: + up to 8 DI/toggle variants per seat
+# Emergency quick fallback keeps cap 32 (matching options-shuffle's 32x32 budget so it finishes before the hard stop)
+# while still adding up to 8 policy-picked DI/toggle variants per seat via +tdi8.
+QUICK_POLICY_EMERGENCY_MENU, QUICK_POLICY_EMERGENCY_CAP = "policy24+gumbel8+tdi8", 32
 # The match settings that are the game's turn clock, not the simulation (ui/UILayer.gd and main.gd
 # read them; game.gd never does): kept for the deadline, never sent to the sim.
 TIMER_KEYS = ("timer_mode", "turn_time", "turn_min_length", "increment_starting_time", "increment_per_turn",
@@ -596,8 +598,8 @@ class Deepener:
             cap, cap_policy = QUICK_CAP, QUICK_POLICY
             base = [cap_candidates(c, QUICK_CAP, QUICK_POLICY, f"{self.engine.match_seed}:{self.obs.turn}:{s}")
                     for s, c in enumerate(self.obs.candidates)]
-        else:  # self-play's policy-picked quick menus + DI/toggle variants (salt "seed:turn")
-            cap, cap_policy = QUICK_POLICY_CAP, QUICK_POLICY_MENU_TDI
+        else:  # emergency quick fallback: cap-32 policy menu + up to 8 DI/toggle variants per seat
+            cap, cap_policy = QUICK_POLICY_EMERGENCY_CAP, QUICK_POLICY_EMERGENCY_MENU
             salt = f"{self.engine.match_seed}:{self.obs.turn}"
             check()
             base = qp.menus(self.obs.state, self.obs.candidates, cap, cap_policy, salt)

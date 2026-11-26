@@ -58,6 +58,10 @@ def test_names_parse_and_cap():
         assert quick_policy.is_quick_policy(p)
         assert quick_policy.parse(p)[:2] == (40, 8)
         quick_policy.check_cap(p, 48)
+    assert quick_policy.is_quick_policy("policy24+gumbel8+tdi8")
+    assert quick_policy.parse("policy24+gumbel8+tdi8") == (24, 8, 0)
+    quick_policy.check_cap("policy24+gumbel8+tdi8", 32)
+    assert quick_policy.tdi_budget("policy24+gumbel8+tdi8") == 8
     assert quick_policy.tdi_budget("policy40+gumbel8+parryx6") == 0
     assert quick_policy.tdi_budget("policy40+gumbel8+parryx6+tdi8") == 8
 
