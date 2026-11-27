@@ -28,7 +28,7 @@ it, its best-so-far mix is played, and production's quick turn only if the full 
 by an emergency point (yomibench.anytime). The timer settings are the game's clock, not the
 simulation: they are never sent to the sim.
 
-Each decision's log line says what produced the bot's move (`bot.path`: full, partial-full, quick or
+Each decision's log line says what produced the bot's move (`bot.path`: full, partial-full, floor, quick or
 continue), with its think time and the clock it left (`bot.clock`); the result line counts the paths.
 
 Think until lock-in (option `think_until_lockin`, default on; the panel's "Bot uses your thinking time"): the bot
@@ -117,7 +117,7 @@ PICK_STYLES = ("mixed", "strongest")
 # "Bot CPU use" (the panel's; option `cpu`): the bot shares the player's PC with the game they are playing. light
 # (default) runs the server at BelowNormal, so the game and the player's other programs come first; full runs it at
 # Normal, which helps only when other programs keep the PC busy. The search is one thread either way, and the app
-# caps the math libraries at 2 threads (more gave the value net no speed).
+# caps the math libraries at 1 thread (more gave the value net no speed).
 CPU_USES = ("light", "full")
 PRIORITY_CLASS = {"light": 0x00004000, "full": 0x00000020}  # BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS
 
@@ -159,6 +159,8 @@ SETTINGS_PRESETS: dict[str, dict[str, Any]] = {
                "timer_mode": "chess", "turn_time": 15, "turn_min_length": 15},
 }
 TIMER_KEYS = anytime.TIMER_KEYS
+FLOORS = ("auto", "on", "off")  # yomibench.anytime's quick-menu floor (Session floor=, --floor)
+FLOOR_MIN_PREVIEWS = 200  # the auto switch's first measurement: at least this many previews searched
 # What a decision message may carry. Moves are simultaneous: the human's input for this turn only
 # ever arrives with the next decision (`inputs`, last turn's), after the bot has answered.
 # bot_clock_s: the bot's own clock (the game's P2 turn timer) as the turn opened; never anything of the human's.
@@ -506,11 +508,13 @@ class Session:
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
                  deadline_fraction: float = anytime.DEADLINE_FRACTION, log: Callable[[str], None] = print,
                  engine_spec: str | None = None, bot_factory: Callable[[str], Any] | None = None,
-                 quick_policy: Any = None):
+                 quick_policy: Any = None, floor: str = "auto"):
         """`bot_factory(bot_spec)` builds the bot (default yomibench.bots.make_bot): a build that plays a search
         variant of its own (e.g. a candidate set's extra pass) passes its own. `quick_policy` (a pinned
         yomibench.quick_policy.QuickPolicy, `load_quick_policy`; default None: off, and off changes nothing) is
-        the stoppable search's policy net (yomibench.anytime's module doc)."""
+        the stoppable search's policy net (yomibench.anytime's module doc). `floor` (FLOORS) is yomibench.anytime's
+        quick-menu floor: auto runs it while the bot's measured preview rate is below anytime.FLOOR_RATE (a slow PC)
+        or not yet measured, on always, off never."""
         from yomibench.bots import make_bot
 
         self.bot_spec, self.candidate_set = bot_spec, candidate_set
@@ -537,6 +541,12 @@ class Session:
             raise ValueError(f"bank refine turns must be >= 0 (0: no refinement share): {bank_refine_turns}")
         self.bank_refine_turns = float(bank_refine_turns)
         self.quick_policy = quick_policy
+        if floor not in FLOORS:
+            raise ValueError(f"floor must be one of {FLOORS}: {floor!r}")
+        self.floor = floor
+        # The bot's preview rate (previews per second of search, value net included) over this server's decisions:
+        # [previews, seconds], for the floor's auto switch. Counted on decisions with real work only.
+        self.preview_work = [0, 0.0]
         self.bot = (bot_factory or make_bot)(bot_spec)
         if getattr(self.bot, "playout_cap", None):  # human play always searches full turns
             raise ValueError(f"{bot_spec}: human play searches every turn in full; drop the @cheap option")
@@ -926,6 +936,29 @@ class Session:
 
     # --- think until lock-in (yomibench.anytime) ---------------------------------------------
 
+    def preview_rate(self) -> float | None:
+        """Previews per second of search so far (None: too little measured yet)."""
+        n, s = self.preview_work
+        return None if n < FLOOR_MIN_PREVIEWS or s <= 0 else round(n / s, 1)
+
+    def use_floor(self) -> bool:
+        if self.floor != "auto":
+            return self.floor == "on"
+        rate = self.preview_rate()
+        return rate is None or rate < anytime.FLOOR_RATE
+
+    def note_preview_rate(self, trace: list[dict[str, Any]]) -> None:
+        """Adds the decision's quick (0) and full (1) search stages to `preview_work`: their time is mostly
+        previews and value batches. The deeper stages' time goes largely to branch continues, which would pull a
+        fast PC's rate under the floor's threshold."""
+        for t in trace:
+            if t.get("stage") not in (0, 1):
+                continue
+            n = int(t.get("work", {}).get("previews", 0))
+            if n > 0:
+                self.preview_work[0] += n
+                self.preview_work[1] += float(t.get("ms", 0.0)) / 1000
+
     def _anytime(self, g: Game, obs: Observation, clock: anytime.Clock, *, deep: bool,
                  available: float | None) -> tuple[dict[str, Any], dict[str, Any]]:
         """The bot's answer from yomibench.anytime. With a turn timer (`available` seconds on the
@@ -934,8 +967,10 @@ class Session:
         emergency point. Without one, nothing cuts the production search. With `deep` (think until
         lock-in), deeper stages follow until the human locks in. Returns the log's bot info and the
         reply's `depth`."""
+        floor = self.use_floor()
         out = anytime.think(self.bot, obs, BOT_SEAT, self.engine, clock, deep=deep,  # type: ignore[arg-type]
-                            quick_policy=self.quick_policy)
+                            quick_policy=self.quick_policy, floor=floor)
+        self.note_preview_rate(out.trace)
         style = g.options.get("pick", "mixed")
         cands = obs.candidates[BOT_SEAT]
 
@@ -947,7 +982,7 @@ class Session:
         fallback = "continue" if best is None else ("quick" if best.name == "quick" else None)
         work = {k: sum(t.get("work", {}).get(k, 0) for t in out.trace) for k in anytime.new_work()}
         notes: dict[str, Any] = {"path": out.path, "stopped": out.stopped, "fallback": fallback, "trace": out.trace,
-                                 "work": work,
+                                 "work": work, "floor": floor, "preview_rate": self.preview_rate(),
                                  "lock_in_ms": lock_ms, "deep": deep,
                                  "converged_ms": None if clock.converged_at is None
                                  else round((clock.converged_at - clock.t0) * 1000, 1),
@@ -957,7 +992,8 @@ class Session:
                                  "lock_cap_s": clock.lock_cap,
                                  "timer_available_s": None if available is None else round(available, 3),
                                  "answered_s": round(time.monotonic() - clock.t0, 3)}
-        played = {"partial-full": "the full search's best so far", "quick": "the emergency quick search"}
+        played = {"partial-full": "the full search's best so far", "quick": "the emergency quick search",
+                  "floor": "the quick-menu floor"}
         if available is None and clock.soft_at is not None:
             g.untimed_locked += 1
         if out.production is None and clock.lock_cap is not None and out.stopped in ("lock-cap", "emergency"):
@@ -1322,6 +1358,9 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
                     help="ranked (a chess clock): the full search's refinement stops at 1/N of the bank's room above "
                          "the reserve per turn and plays its converged answer; its base search keeps the whole room "
                          f"(default {anytime.BANK_REFINE_TURNS:g}; 0: off)")
+    ap.add_argument("--floor", choices=FLOORS, default="auto",
+                    help="the quick-menu floor: a small solved menu ready before the full search, played unless the "
+                         "full search converges; auto (default) while the bot's search is slow on this PC, on, off")
     ap.add_argument("--quick-policy", default=None, metavar="PATH",
                     help="a pinned policy net (.npz) for the stoppable search: the emergency quick turn's menus, the full "
                          "search's warm start and the two-decision stages' child menus (default: none, off)")
@@ -1389,7 +1428,7 @@ def main(argv: list[str] | None = None) -> int:
                       deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
                       bank_reserve=args.bank_reserve, bank_deep_turns=args.bank_deep_turns,
                       lock_converged=args.lock_converged, bank_refine_turns=args.bank_refine_turns,
-                      engine_spec=args.engine, quick_policy=load_quick_policy(args))
+                      engine_spec=args.engine, quick_policy=load_quick_policy(args), floor=args.floor)
     server = Server(session, args.port, args.host)
     print(f"human-play bot server: {session.label} (candidate set {bot.candidate_set}) on {args.host}:{server.port}; "
           f"engine build {session.hello.get('build', {}).get('yomisim_sha', '?')[:7]}; logs in {session.out}", flush=True)
