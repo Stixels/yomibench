@@ -42,6 +42,14 @@ the best-so-far), the cap shrinks to LOCK_CONVERGED_S after the later of the loc
 only factor refinement is cut, and the turn plays its latest converged answer. A chess bank turn also stops refinement
 at its share of the bank (`bank_refine_s`, "refine-share"); neither rule ever cuts a search that has no converged round.
 
+**Chess-clock pacing of the deeper stages** (`bank_deep_after`, `Clock.deep_after`): on a chess bank turn the deeper
+stages' allowance is counted from when the production search FINISHES, not from the decision's open, so a long stage 1
+never eats it. A contested turn (both seats actionable, or a Burst on either seat's menu: `contested`) gets
+min(BANK_DEEP_CAP_S, (bank - reserve) / BANK_DEEP_TURNS) after stage 1 (840 s of room: 25 s; 240 s: 12 s; tapering
+linearly to 0 at the reserve). A routine turn (one-sided or DI-only, no Burst) gets 0: it answers as soon as stage 1
+is done, keeping the bank for contested turns. The bank budget's hard stop, the after-lock cap, the think cap and a
+lock-in still stop the deeper stages first.
+
 **Think until I lock in** (on by default since private build v4: the bot uses the human's thinking time): the
 bot answers a decision with the deepest search it finished before it had to stop, at the latest THINK_CAP_S
 after the decision opened (configurable; a cap on the extra stages only, so an untimed game never waits on
@@ -133,11 +141,18 @@ LOCK_CONVERGED_S = 1.5
 # than the floor's own stop it plays on the floor, the per-turn deadline every timed turn has (bank_budget).
 BANK_RESERVE_S = 60.0
 # On a chess bank turn the production search may use all of the room above the reserve, but the optional deeper stages
-# after it (widen, two-decision) stop at 1/BANK_DEEP_TURNS of that room (bank_deep_s; human_play --bank-deep-turns): the
-# game charges the bot's clock while it waits on the human, and thinking until every lock-in drained a 900 s bank to
-# the floor in every g16 audit game (by turn 29-74). A share of what is left shrinks as the bank does, so it never
-# reaches the floor by itself.
-BANK_DEEP_TURNS = 100.0
+# after it (widen, two-decision) get at most min(BANK_DEEP_CAP_S, room / BANK_DEEP_TURNS), counted from when the
+# production search finishes, and only on a contested turn (bank_deep_after; human_play --bank-deep-turns,
+# --bank-deep-cap). The game charges the bot's clock while it waits on the human, and thinking until every lock-in
+# drained a 900 s bank to the floor in every g16 audit game (by turn 29-74), so the allowance is a share of what is
+# left: it shrinks as the bank does and never reaches the reserve by itself. A 1/100 share counted from the decision's
+# open was too little: stage 1 alone (5-9 s on a neutral turn) used it up, so no contested think-cap turn ran a
+# two-decision stage, and games ended with minutes of bank unused.
+BANK_DEEP_TURNS = 20.0
+BANK_DEEP_CAP_S = 25.0
+# The defensive bursts, as candidates name them (human_play's pick rule uses the same set). A turn with one on either
+# seat's menu is contested (`contested`): Burst against Continue/DI is a real mixed choice.
+BURST_ACTIONS = frozenset({"Burst", "DefensiveBurst"})
 # On a chess bank turn, the production search's factor refinement (everything after its first converged round) stops at
 # 1/BANK_REFINE_TURNS of the room above the reserve (bank_refine_s; human_play --bank-refine-turns; 840 s of room: 21 s),
 # and the turn plays the latest converged answer. The base double oracle keeps the whole budget, so the share never
@@ -202,6 +217,12 @@ class Clock:
         # A chess bank turn's refinement share (bank_refine_s): past this (monotonic), a production search that has a
         # converged answer stops ("refine-share") and plays it. Unset (None) elsewhere; never cuts an unsolved search.
         self.refine_at: float | None = None
+        # A chess bank turn's deeper-stage allowance (bank_deep_after), counted from when the production search
+        # finishes: `run` then moves `cap_at` to at most that moment + deep_after (0: answer at once, a routine
+        # turn). None (untimed, per-turn timed, floor turns): `cap_at` as set, unchanged.
+        self.deep_after: float | None = None
+        self.deep_from: float | None = None  # when that allowance started (monotonic): the production search's end
+        self.deep_kind: str | None = None  # bank_deep_after's kind ("contested" | "routine"), for the log
         self.t0 = time.monotonic()
         self._soft, self._hard = threading.Event(), threading.Event()
         self._soft_why = self._hard_why = ""
@@ -264,6 +285,15 @@ class Clock:
         """A bank turn's refinement share is spent and the production search has a converged answer to play."""
         return (self.refine_at is not None and self.converged_at is not None
                 and time.monotonic() + self.step_s >= self.refine_at)
+
+    def start_deep(self) -> None:
+        """The production search has finished: a bank turn's deeper stages may run `deep_after` more seconds from now,
+        never past `cap_at` as already set (the think cap, the budget). No-op without `deep_after`."""
+        if self.deep_after is None or self.deep_from is not None:
+            return
+        self.deep_from = time.monotonic()
+        at = self.deep_from + max(0.0, self.deep_after)
+        self.cap_at = at if self.cap_at is None else min(self.cap_at, at)
 
     def emergency(self) -> float | None:
         """When a production search that has solved nothing yet gives way to the quick search: the turn
@@ -342,11 +372,32 @@ def bank_budget(bank_left: float, turn_s: float, reserve_s: float = BANK_RESERVE
     return "floor", floor
 
 
-def bank_deep_s(bank_left: float, reserve_s: float = BANK_RESERVE_S, turns: float = BANK_DEEP_TURNS) -> float:
-    """How long into a chess-clock bank turn the optional deeper stages may run: this turn's share of the room above
-    the reserve, (bank_left - reserve_s) / turns (900 s and the 60 s reserve: 8.4 s). The production search is not
-    bound by it (only the bank budget's hard stop and the after-lock cap cut that)."""
-    return max(0.0, bank_left - reserve_s) / turns
+def bank_deep_s(bank_left: float, reserve_s: float = BANK_RESERVE_S, turns: float = BANK_DEEP_TURNS,
+                cap_s: float = BANK_DEEP_CAP_S) -> float:
+    """How long the optional deeper stages of a contested chess-clock bank turn may run after the production search
+    finishes: this turn's share of the room above the reserve, min(cap_s, (bank_left - reserve_s) / turns) (900 s and
+    the 60 s reserve: 25 s; 300 s: 12 s; 80 s: 1 s; at or under the reserve: 0). Linear in the room, so it tapers
+    smoothly to 0 as the bank nears the reserve. The production search is not bound by it (only the bank budget's
+    hard stop, the refinement share and the after-lock cap cut that)."""
+    return max(0.0, min(cap_s, max(0.0, bank_left - reserve_s) / turns))
+
+
+def contested(obs: Observation) -> bool:
+    """A turn worth thinking deeper on: both seats actionable (a neutral, simultaneous guess), or a defensive Burst on
+    either seat's menu (BURST_ACTIONS: Burst against Continue/DI is a mixed choice). Otherwise (one seat only answers
+    the other's turn, e.g. DI while being hit) the turn is routine."""
+    if all(obs.actionable):
+        return True
+    return any(c.action in BURST_ACTIONS for seat in obs.candidates for c in seat)
+
+
+def bank_deep_after(obs: Observation, bank_left: float, reserve_s: float = BANK_RESERVE_S,
+                    turns: float = BANK_DEEP_TURNS, cap_s: float = BANK_DEEP_CAP_S) -> tuple[str, float]:
+    """A chess bank turn's deeper-stage plan as (kind, seconds after the production search finishes): ("contested",
+    bank_deep_s(...)) or ("routine", 0.0), which answers as soon as stage 1 is done (`contested`)."""
+    if contested(obs):
+        return "contested", bank_deep_s(bank_left, reserve_s, turns, cap_s)
+    return "routine", 0.0
 
 
 def bank_refine_s(bank_left: float, reserve_s: float = BANK_RESERVE_S, turns: float = BANK_REFINE_TURNS) -> float:
@@ -961,6 +1012,7 @@ def run(stages: list[Stage], clock: Clock) -> Outcome:
         best = ans
         if ans.name == "production":
             production = ans
+            clock.start_deep()  # a bank turn's deeper-stage allowance starts now, not at the decision's open
     return Outcome(best, stopped, trace, production)
 
 
