@@ -203,10 +203,10 @@ def test_a_model_of_an_unknown_feature_version_is_refused(tmp_path):
 
     from yomibench.valuenet import ValueNet
 
-    for version in (1, 4, None):
+    for version in (1, 5, None):
         path = tmp_path / f"v{version}.npz"
         np.savez(path, meta=np.array(json.dumps({"features": version, "vocab": {}})))
-        with pytest.raises(ValueError, match=rf"feature version {version}; this code plays versions \[2, 3\]"):
+        with pytest.raises(ValueError, match=rf"feature version {version}; this code plays versions \[2, 3, 4\]"):
             ValueNet.load(path)
 
 
