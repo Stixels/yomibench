@@ -54,8 +54,14 @@ var extra_node = null    # the character's PlayerExtra scene (Wizard hover, Robo
 var set5 = {}            # set 5's switches: draw_pairs (A), gun_aim_fine (B), bullet_di (C), draw_base (R)
 var character = ""       # this seat's character name (set 5 changes only set5_characters)
 var game = null          # the game this fighter plays in (set 5's bullet owner check reads its objects)
-var set6 = {}            # set 6 for this seat's character: {pairs, clicks, triples, toggle_only}; {} = off
+var set6 = {}            # set 6 for this seat's character: {pairs, clicks, triples, toggle_only, juke_sections,
+                         # pool, pool_dirs, switch}; {} = off
+var set7 = {}            # set 7's data-widget switches: {xy_fine, di_fine_all, multi_xy_base, multi_xy}
 var panel_slots = {}     # set 6: move name -> its panel slots this decision
+var pool_slots = {}      # set 7 L1: move name -> its pool-only triples this decision
+var switch_slots = {}    # set 7 switch sets: move name -> its switch sets (explicit) this decision
+var aimed_cache = {}     # set 7 L2: move name -> its aimed widgets this decision
+var turn_sections = null # set 7 juke_sections: the turn-open panel's JukeDir sections (null: not read yet)
 
 # This decision's lookups (rebuilt by generate()).
 var recipes = {}         # candidate id -> recipe (generated and expanded candidates)
@@ -77,6 +83,7 @@ func setup(fighter_, max_candidates_, set5_ = {}, character_ = "", game_ = null,
 	max_candidates = max_candidates_  # 0: no budget, every variant
 	set5 = set5_
 	set6 = _set6_for(set6_, character_)
+	set7 = _set7_for(set6_)
 	character = character_
 	game = game_
 	_load_rules()
@@ -162,6 +169,10 @@ func generate():
 	di_values = _di_values()
 	extra_sets = {}
 	panel_slots = {}
+	pool_slots = {}
+	switch_slots = {}
+	aimed_cache = {}
+	turn_sections = null
 	_new_d5()
 	var cont_sets = _sets_for(null)
 	var moves = []   # [{state, recipes}]
@@ -193,6 +204,11 @@ func generate():
 			if j > 0 and _validate_recipe(_recipe(state, {}, j, null)) == "":
 				moves.append({"state": state, "recipes": _data_recipes(state, j)})
 				listed[state.name] = true
+	if set7.get("multi_xy_base", false):
+		# Set 7 L3: each multi-XY move's same-value entries after its variants (before the budget).
+		for m in moves:
+			if m.state != null:
+				_same_value_entries(m.state, m.recipes)
 	if _s5("draw_base"):
 		# Set 5 R: each move's Draw base entry after its variants (before the budget).
 		for m in moves:
@@ -215,6 +231,12 @@ func generate():
 			_set_fans(out)
 		for c in out:
 			_set5_meta(c, recipes[c.id])
+	if set7.get("xy_fine", false) or set7.get("di_fine_all", false):
+		for c in out:
+			_set7_meta(c, recipes[c.id])
+	if set7.get("multi_xy", false):
+		for c in out:
+			_l3_meta(c, recipes[c.id])
 	for c in out:
 		d5.keys.append(_cand_key(c))
 	return out
@@ -262,7 +284,7 @@ func _budget(moves):
 
 func _recipe(state, widgets, k, data):
 	return {"state": state, "widgets": widgets, "extra_set": k, "di": 0, "feint": false, "reverse": false,
-		"data": data, "aim": 0, "di_fine": 0}
+		"data": data, "aim": 0, "di_fine": 0, "xy": 0, "di_fine_all": 0, "xy_grid": 0}
 
 
 # The factors expand() may change on a candidate of this move, for the candidate's `factors`.
@@ -297,7 +319,13 @@ func _feintable(state):
 # Set 5: an aim or di_fine path that doesn't exist returns {"error": why} (expand only).
 func _build(r):
 	var data = r.data
-	if r.state != null and _has_data(r.state) and (r.reverse or data == null):
+	if r.state != null and r.xy != 0:
+		# Set 7 L2: the widget settings with the xy paths' widget values set last.
+		var settings = _xy_settings(r)
+		if typeof(settings) == TYPE_STRING:
+			return {"error": settings}
+		data = _data_for(r.state, settings, r.reverse)
+	elif r.state != null and _has_data(r.state) and (r.reverse or data == null):
 		data = _data_for(r.state, r.widgets, r.reverse)
 	if r.aim != 0:
 		data = _aim_data(r, data)
@@ -310,7 +338,7 @@ func _build(r):
 	else:
 		extras = _extras_k(r.state, r.extra_set)
 	var di
-	if r.di_fine != 0:
+	if r.di_fine != 0 or r.di_fine_all != 0:
 		var v = _di_vec(r)
 		if typeof(v) == TYPE_STRING:
 			return {"error": v}
@@ -338,7 +366,9 @@ func expand(base_id, override):
 	var r = recipes[base_id].duplicate()
 	for key in override:
 		var on5 = (key == "aim" and _s5("gun_aim_fine")) or (key == "di_fine" and _s5("bullet_di"))
-		if not key in ["di", "feint", "reverse", "extra_set"] and not on5:
+		var on7 = (key == "xy" and set7.get("xy_fine", false)) or (key == "di_fine_all" and set7.get("di_fine_all", false)) \
+				or (key == "xy_grid" and set7.get("multi_xy", false))
+		if not key in ["di", "feint", "reverse", "extra_set"] and not on5 and not on7:
 			return {"error": "unknown factor %s" % str(key)}
 	if override.has("di"):
 		var d = override.di
@@ -365,12 +395,34 @@ func expand(base_id, override):
 			if f == "di_fine" and not d5.owns_bullet and int(x) != 0:
 				return {"error": "di_fine needs a live bullet of this seat's"}
 			r[f] = int(x)
+	# Set 7 L2 / L2-DI: xy (packed per-widget paths, checked against the move's aimed widgets when built) and
+	# di_fine_all (a base-5 path applied after di_fine).
+	for f in ["xy", "di_fine_all"]:
+		if override.has(f):
+			var x = override[f]
+			if not (typeof(x) in [TYPE_INT, TYPE_REAL]) or int(x) != x or x < 0 or x >= (1 << (XY_BITS * XY_SLOTS)):
+				return {"error": "%s must be a factor path (a non-negative integer)" % f}
+			if f == "di_fine_all":
+				var digits = _path_digits(int(x), 5)
+				if digits.size() > DI_ALL_DEPTH or 0 in digits:
+					return {"error": "di_fine_all %d is not a path of at most %d steps (base-5 digits, none 0)" % [int(x), DI_ALL_DEPTH]}
+				if int(x) != 0 and not fighter.di_enabled:
+					return {"error": "DI is disabled"}
+			r[f] = int(x)
 	if override.has("extra_set"):
+		# Pool-only values (L1's triples, switch sets) are numbered after every listed value.
 		var k = override.extra_set
-		var n_sets = _n_extra_sets(r.state)
+		var n_sets = _n_all_sets(r.state)
 		if not (typeof(k) in [TYPE_INT, TYPE_REAL]) or int(k) != k or k < 0 or k >= n_sets:
 			return {"error": "extra_set must be below %d for %s" % [n_sets, _name(r.state)]}
 		r.extra_set = int(k)
+	if override.has("xy_grid"):
+		var v = override.xy_grid
+		if not (typeof(v) in [TYPE_INT, TYPE_REAL]) or int(v) != v or v < 0 or v > 4294967295:
+			return {"error": "xy_grid must be a packed grid index (a non-negative integer)"}
+		var gerr = _apply_xy_grid(r, int(v))
+		if gerr != "":
+			return {"error": gerr}
 	var err = _validate_recipe(r)
 	if err != "":
 		return {"error": err}
@@ -379,8 +431,11 @@ func expand(base_id, override):
 		return c
 	if d5.applies:
 		_set5_meta(c, r)
+	_set7_meta(c, r)
+	_l3_meta(c, r)
 	var key = _cand_key(c)
-	if r.aim != 0 or r.di_fine != 0 or r.extra_set >= _sets_for(r.state).size():
+	if r.aim != 0 or r.di_fine != 0 or r.extra_set >= _sets_for(r.state).size() or r.xy != 0 or r.di_fine_all != 0 \
+			or r.xy_grid != 0:
 		# Set 5's own expansions are refused when they repeat a listed or expanded candidate.
 		var k = d5.keys.find(key)
 		if k >= 0:
@@ -393,22 +448,28 @@ func expand(base_id, override):
 func _validate_recipe(r):
 	var layer = _layer_slot(r.state, r.extra_set)
 	if layer != null:
-		# A combined set (set 5's Draw pair, set 6's panel set) is valid when the move validates with each of
-		# its own sets.
+		if layer[0] == "switch":
+			# A switch set is valid when the move is legal with the whole set made (its widgets may only take
+			# their values together: a toggle and the plot it reveals).
+			return _validate_explicit(r, layer[1])
+		# A combined set (set 5's Draw pair, set 6's panel set, L1's pool triple) is valid when the move validates
+		# with each of its own sets.
 		var slot = layer[1]
 		for k in slot:
 			var rk = r.duplicate()
 			rk.extra_set = k
 			var e = _validate_recipe(rk)
 			if e != "":
-				if layer[0] == "pair":
-					return "pair extra set %d (sets %d + %d): %s" % [r.extra_set, slot[0], slot[1], e]
-				return "panel extra set %d (sets %s): %s" % [r.extra_set, str(slot), e]
+				return "combined extra set %d (sets %s): %s" % [r.extra_set, str(slot), e]
 		return ""
-	if r.di_fine != 0:
+	if r.di_fine != 0 or r.di_fine_all != 0:
 		var v = _di_vec(r)
 		if typeof(v) == TYPE_STRING:
 			return v
+	if r.xy != 0:
+		var s = _xy_settings(r)
+		if typeof(s) == TYPE_STRING:
+			return s
 	_activate_extra()
 	var err = _apply_extra_set(r.extra_set, r.state)
 	if err == "" and r.state != null and not r.state in legal_states():
@@ -556,6 +617,9 @@ func _pair_slots(state):
 # slot gives. Validation is shared (_validate_recipe: valid when the move validates with each own set of the
 # slot). A later candidate set adds a layer at the end, so every earlier index keeps its meaning.
 const LAYERS = ["pair", "panel"]
+# Set 7's pool-only layers, numbered after every listed value and never counted in factors.extra_set (so refinement
+# and exploration never walk them): L1's triples, then the switch sets.
+const POOL_LAYERS = ["pool", "switch"]
 
 
 func _n_extra_sets(state):
@@ -565,12 +629,20 @@ func _n_extra_sets(state):
 	return n
 
 
+# Every extra_set value of a move, the pool-only ones included.
+func _n_all_sets(state):
+	var n = _n_extra_sets(state)
+	for key in POOL_LAYERS:
+		n += call("_%s_slots" % key, state).size()
+	return n
+
+
 # [layer key, slot] for an index past the move's own sets; null for an own set.
 func _layer_slot(state, k):
 	k -= _sets_for(state).size()
 	if k < 0:
 		return null
-	for key in LAYERS:
+	for key in LAYERS + POOL_LAYERS:
 		var slots = call("_%s_slots" % key, state)
 		if k < slots.size():
 			return [key, slots[k]]
@@ -766,6 +838,12 @@ func _di_vec(r):
 		var n = _di_step(v[0], v[1], digits[l], l)
 		if n == null:
 			return "di_fine %d has no step %d from DI (%d, %d)" % [r.di_fine, l + 1, v[0], v[1]]
+		v = n
+	digits = _path_digits(r.di_fine_all, 5)
+	for l in range(digits.size()):
+		var n = _di_step(v[0], v[1], digits[l], l)
+		if n == null:
+			return "di_fine_all %d has no step %d from DI (%d, %d)" % [r.di_fine_all, l + 1, v[0], v[1]]
 		v = n
 	return v
 
@@ -1566,7 +1644,18 @@ func _set6_for(switches, character_):
 	if not pairs and not clicks:
 		return {}
 	return {"pairs": pairs, "clicks": clicks, "triples": pairs and bool(switches.get("triples", false)),
-		"toggle_only": bool(switches.get("toggle_only_" + c, false))}
+		"toggle_only": bool(switches.get("toggle_only_" + c, false)),
+		# set 7 (YomiServer SET6_EXTRA_KEYS): these ride on the seat's panel sets, as in the simulator
+		"juke_sections": bool(switches.get("juke_sections", false)), "pool": bool(switches.get("l1_pool", false)),
+		"pool_dirs": bool(switches.get("l1_panel_dirs", false)), "switch": bool(switches.get("switch_sets", false))}
+
+
+# Set 7's data-widget switches (any character of a set-6 seat).
+func _set7_for(switches):
+	var out = {}
+	for k in ["xy_fine", "di_fine_all", "multi_xy_base", "multi_xy"]:
+		out[k] = typeof(switches) == TYPE_DICTIONARY and bool(switches.get(k, false))
+	return out
 
 
 # A move's panel slots (cached per move): single clicks [k] first, then pairs [i, j] (i < j, on different
@@ -1630,7 +1719,7 @@ func _panel_extras(state, slot):
 # `s` made on a fresh panel as a player makes it (the server's probe): the panel activated, the move selected,
 # then each widget clicked with the move selected again after each. Its extras, or null if a widget refuses.
 func _fresh_apply(s, state):
-	var saved = _swap_in_fresh_panel()
+	var saved = _swap_in_fresh_panel(true)
 	_activate_extra()
 	_extra_select(state)
 	var ok = true
@@ -1655,11 +1744,15 @@ func _fresh_set4(s, state):
 	return e
 
 
-func _swap_in_fresh_panel():
+# probe_style: a panel for a set made as the probe makes it; with set 7's juke_sections it reads the turn-open JukeDir
+# sections (_set_turn_sections).
+func _swap_in_fresh_panel(probe_style = false):
 	var saved = extra_node
 	extra_node = fighter.player_extra_params_scene.instance()
 	extra_node.set_fighter(fighter)
 	add_child(extra_node)
+	if probe_style and set6.get("juke_sections", false):
+		_set_turn_sections()
 	return saved
 
 
@@ -1707,3 +1800,765 @@ func _has_toggle(s, kinds):
 
 func _extras_key(e):
 	return JSON.print(e, "", true)
+
+
+# --- set 7 (candidate rules v6 + SET6_EXTRA_KEYS; the simulator is the reference) ------------------------------------
+# Switches outside set 6's 16, each its own rules hash (YomiServer.set6_hash): juke_sections (L0), l1_pool and
+# l1_panel_dirs (L1's pool-only triples and toggle_pool), xy_fine and di_fine_all (L2: the `xy` and `di_fine_all`
+# factors), multi_xy_base and multi_xy (L3: same-value base entries and the `xy_grid` factor), switch_sets (pool-only
+# sets for panel values set 6 never builds). Set 7 as played is set 6 with the first six on; d1bd8211465b adds
+# switch_sets. Nothing here runs with every one of them off.
+
+# L2: xy angle step at depth 0 (degrees), length step (share of the radius); depth k divides each by 2^k. Where the
+# neighbouring grid angle on a side is more than XY_GAP away, the first step to that side is the gap's bisector.
+const XY_ANGLE_STEP = 15.0
+const XY_LENGTH_STEP = 0.25
+const XY_GAP = 45.0
+const XY_DEPTH = 3
+const DI_ALL_DEPTH = 3
+const XY_BITS = 7        # bits per aimed widget in a packed xy value (a depth-3 base-5 path is at most 124)
+const XY_SLOTS = 4       # at most this many aimed widgets per move
+const XY_GRID_SLOTS = 8  # L3: the most XY slots an xy_grid value packs (4 bits each)
+
+
+# Python float semantics (as the reference computes): floored %, math.radians / math.degrees (one multiplication
+# by a constant computed in double).
+func _fmod_floor(a, b):
+	var m = fmod(a, b)
+	if m == 0.0:
+		return 0.0
+	if (b < 0.0) != (m < 0.0):
+		return m + b
+	return m
+
+
+func _norm7(a):
+	a = _fmod_floor(a + 180.0, 360.0) - 180.0
+	return 180.0 if a == -180.0 else a
+
+
+func _radians(x):
+	return x * (PI / 180.0)
+
+
+func _degrees(x):
+	return x * (180.0 / PI)
+
+
+func _rel_angle_to(x, y, toward):
+	return _norm7(_degrees(atan2(-float(y), float(x) * toward)))
+
+
+# Dictionaries compare by reference in Godot 3; extras values (fly_dir {x, y}, ...) compare by content.
+func _same(a, b):
+	return typeof(a) == typeof(b) and JSON.print(a) == JSON.print(b)
+
+
+# --- L1: pool-only triples and the toggle pool ---------------------------------------------------------------
+
+# A move's pool-only triples (cached per move), numbered after its panel sets: three of its single changes, i<j<k,
+# pairwise on different widgets, at least one a toggle click, made together as a panel set is, kept when the fresh
+# panel's extras are new (not the reset panel's, a Draw pair's, a listed panel set's or an earlier triple's). Empty
+# unless l1_pool is on, and when set 6 already lists triples.
+func _pool_slots(state):
+	if state == null or set6.empty() or not set6.pool or set6.triples:
+		return []
+	if pool_slots.has(state.name):
+		return pool_slots[state.name]
+	var sets = _sets_for(state)
+	var n = sets.size()
+	var kinds = _widget_kinds()
+	var seen = [_extras_key(_fresh_set4(sets[0], state))]
+	for slot in _pair_slots(state):
+		seen.append(_extras_key(_overlay(_fresh_set4(sets[slot[0]], state), _fresh_set4(sets[slot[1]], state))))
+	for slot in _panel_slots(state):
+		var e = _fresh_apply(_combine(sets, slot, kinds), state)
+		if e != null:
+			seen.append(_extras_key(e))
+	var out = []
+	for i in range(1, n):
+		for j in range(i + 1, n):
+			if not _disjoint(sets[i], sets[j]):
+				continue
+			for k in range(j + 1, n):
+				if not (_disjoint(sets[i], sets[k]) and _disjoint(sets[j], sets[k])):
+					continue
+				if not (_has_toggle(sets[i], kinds) or _has_toggle(sets[j], kinds) or _has_toggle(sets[k], kinds)):
+					continue
+				var slot = [i, j, k]
+				var e = _fresh_apply(_combine(sets, slot, kinds), state)
+				if e == null:
+					continue
+				var key = _extras_key(e)
+				if not key in seen:
+					seen.append(key)
+					out.append(slot)
+	pool_slots[state.name] = out
+	return out
+
+
+func _pool_extras(state, slot):
+	return _panel_extras(state, slot)
+
+
+# The Draw pair rule (_pair_extras) on two given extras.
+func _overlay(a, b):
+	var e = a.duplicate(true)
+	for key in R5.pair_overlay_keys:
+		if b.has(key):
+			e[key] = b[key]
+	return e
+
+
+# A move's extra_set values that change a toggle (a boolean extra) from the reset panel's, in extra_set order: its own
+# sets, Draw pairs, panel sets, pool triples and switch sets (Continue: its switch sets only, its own are base entries).
+# With l1_panel_dirs, also its single non-boolean panel changes that take effect (fly_dir only with flight on).
+func _toggle_sets(state):
+	var sw = not set6.empty() and set6.switch
+	if state == null and not sw:
+		return []
+	var n = _sets_for(state).size()
+	var p5 = _pair_slots(state)
+	var panel = _panel_slots(state)
+	var pool = _pool_slots(state)
+	var pooled = n + p5.size() + panel.size() + pool.size()
+	var switches = _switch_slots(state)
+	var total = pooled + switches.size()
+	var pool_dirs = not set6.empty() and set6.pool_dirs
+	var reset = _extras_k(state, 0)
+	var out = []
+	var from = max(pooled, 1) if state == null else 1
+	for k in range(from, total):
+		var e
+		if k >= pooled:
+			e = _switch_extras(state, switches[k - pooled])
+		elif k < n:
+			e = _extras_k(state, k)
+		elif k - n < p5.size():
+			e = _pair_extras(state, p5[k - n])
+		else:
+			var i = k - n - p5.size()
+			e = _panel_extras(state, panel[i] if i < panel.size() else pool[i - panel.size()])
+		if _flips(e, reset) or (pool_dirs and k < n and _changes_dir(e, reset)):
+			out.append(k)
+	return out
+
+
+func _flips(e, reset):
+	for k in e:
+		if typeof(e[k]) == TYPE_BOOL:
+			if not reset.has(k):
+				if e[k]:
+					return true
+			elif not _same(reset[k], e[k]):
+				return true
+	return false
+
+
+func _changes_dir(e, reset):
+	var fly_on = e.has("fly_enabled") and e.fly_enabled == true
+	for k in e:
+		if typeof(e[k]) != TYPE_BOOL and (k != "fly_dir" or fly_on) and reset.has(k) and not _same(reset[k], e[k]):
+			return true
+	return false
+
+
+# The seat's toggle pool at this decision: one entry per listed move other than Continue (its first listed candidate),
+# in list order, with its toggle_sets values and whether it can feint / reverse; with switch_sets, Continue's entry
+# (its switch sets) first where it has any. Every value it names is an extra_override `expand` accepts for any
+# candidate of that move. Needs l1_pool on for this seat. {"moves": [...]} or {"error": why}.
+func toggle_pool():
+	if set6.empty() or not set6.pool:
+		return {"error": "toggle_pool needs set 6 with l1_pool on for this seat's character"}
+	_new_epoch()  # purity: like expand, from fresh widgets
+	var seen = {}
+	var out = []
+	var cont_done = false
+	var ids = recipes.keys()
+	ids.sort()
+	for id in ids:
+		var r = recipes[id]
+		var expanded = r.get("base") != null
+		if r.state == null and not expanded and not cont_done and set6.switch:
+			cont_done = true
+			var cs = _toggle_sets(null)
+			_activate_extra()
+			if not cs.empty():
+				out.append({"candidate": id, "action": "Continue", "extra_sets": cs, "feint": false, "reverse": false})
+			continue
+		if r.state == null or expanded or seen.has(r.state.name):
+			continue
+		seen[r.state.name] = true
+		var ks = _toggle_sets(r.state)
+		_activate_extra()
+		out.append({"candidate": id, "action": r.state.name, "extra_sets": ks, "feint": _feintable(r.state),
+			"reverse": r.state.flip_allowed() and r.state.reversible})
+	return {"moves": out}
+
+
+# --- switch sets ---------------------------------------------------------------------------------------------
+
+# A move's switch sets (cached per move), explicit, numbered after its pool triples: 1. every extra XY plot the move
+# shows, or that a toggle click reveals, at half length on the 8 extra_xy_angles (set 4 lists full length only), the
+# revealing toggle clicked first; 2. Continue only: two of its own single changes on different widgets, made together
+# (set 6's panel sets skip Continue). Kept when every widget takes its value and the fresh panel's extras are new (not
+# the reset panel's, an own set's, a Draw pair's, a listed panel set's, a pool triple's or an earlier switch set's).
+func _switch_slots(state):
+	if set6.empty() or not set6.switch:
+		return []
+	var name = _name(state)
+	if switch_slots.has(name):
+		return switch_slots[name]
+	var sets = _sets_for(state)
+	var n = sets.size()
+	var kinds = _widget_kinds()
+	var seen = []
+	for k in range(n):
+		seen.append(_extras_key(_fresh_set4(sets[k], state)))
+	for k in range(1, n):
+		var e = _fresh_apply(sets[k], state)
+		if e != null:
+			seen.append(_extras_key(e))
+	for slot in _pair_slots(state):
+		seen.append(_extras_key(_overlay(_fresh_set4(sets[slot[0]], state), _fresh_set4(sets[slot[1]], state))))
+	for slot in _panel_slots(state) + _pool_slots(state):
+		var e = _fresh_apply(_combine(sets, slot, kinds), state)
+		if e != null:
+			seen.append(_extras_key(e))
+	var cands = []
+	# 1. half-length XY values, on a fresh panel with the move selected (as _fresh_apply makes them)
+	var half = []
+	for a in EXTRA_XY_ANGLES:
+		var rad = deg2rad(a)
+		half.append({"x": cos(rad) * fighter.get_opponent_dir() * 0.5, "y": -sin(rad) * 0.5, "snap": false})
+	var saved = _swap_in_fresh_panel(true)
+	_activate_extra()
+	_extra_select(state)
+	var ws = _extra_widgets()
+	var shown = []
+	for w in ws:
+		shown.append(w.node.is_visible_in_tree() and not w.node.get("disabled") == true)
+	for ei in range(ws.size()):
+		if kinds[ei] == "xy" and shown[ei]:
+			for v in half:
+				var s = {}
+				s[ei] = v
+				cands.append(s)
+	for ti in range(ws.size()):
+		if kinds[ti] != "toggle" or not shown[ti]:
+			continue
+		# each toggle from the move-selected fresh panel (one toggle's click doesn't carry to the next)
+		_drop(extra_node)
+		extra_node = null
+		_swap_in_fresh_panel(true)
+		_activate_extra()
+		_extra_select(state)
+		ws = _extra_widgets()
+		var on = not ws[ti].node.pressed
+		if _set_widget(ws[ti], on, true) != "":
+			continue
+		_extra_select(state)
+		for ei in range(ws.size()):
+			if kinds[ei] == "xy" and not shown[ei] and ws[ei].node.is_visible_in_tree():
+				for v in half:
+					var s = {}
+					s[ti] = on
+					s[ei] = v
+					cands.append(s)
+	_swap_back_panel(saved)
+	# 2. Continue's pairs
+	if state == null:
+		for i in range(1, n):
+			for j in range(i + 1, n):
+				if _disjoint(sets[i], sets[j]):
+					cands.append(_combine(sets, [i, j], kinds))
+	var out = []
+	for s in cands:
+		var e = _fresh_apply(s, state)
+		if e == null:
+			continue
+		var key = _extras_key(e)
+		if not key in seen:
+			seen.append(key)
+			out.append(s)
+	switch_slots[name] = out
+	return out
+
+
+# A switch set's extras: the fresh panel's with the set made (as _fresh_apply), or as set 4 applies it.
+func _switch_extras(state, s):
+	var e = _fresh_apply(s, state)
+	return e if e != null else _fresh_set4(s, state)
+
+
+# _validate_recipe with an explicit extra set in place of the recipe's own.
+func _validate_explicit(r, s):
+	_activate_extra()
+	var err = _apply_set(s, r.state)
+	if err == "" and r.state != null and not r.state in legal_states():
+		err = "%s is not legal with extra set %d" % [_name(r.state), r.extra_set]
+	if err == "" and r.feint and (r.state == null or not _feintable(r.state)):
+		err = "feint is disabled for %s" % _name(r.state)
+	if err == "" and r.reverse and (r.state == null or not (r.state.flip_allowed() and r.state.reversible)):
+		err = "reverse is disabled for %s" % _name(r.state)
+	_activate_extra()
+	return err
+
+
+# --- juke_sections (L0) ----------------------------------------------------------------------------------------
+# The real panel hides an 8Way's empty rows deferred (try_hide_sections), so a panel made within one frame shows the
+# rows the previous frame left: at a turn's open, the rows the panel shows with Continue selected. A Mutant JukeDir
+# direction in a hidden row reads as neutral. With juke_sections on, probe-style panels read those rows.
+
+func _juke_dir(node):
+	if node == null:
+		return null
+	var out = []
+	_find_extra_widgets(node, out)
+	for w in out:
+		if w.kind == "8way" and str(w.node.name) == "JukeDir":
+			return w.node
+	return null
+
+
+const WAY_ROWS = [["NW", "N", "NE"], ["W", "Neutral", "E"], ["SW", "S", "SE"]]
+
+
+# The turn-open panel's JukeDir rows (cached per decision): a row shows when one of its buttons is enabled.
+func _turn_sections():
+	if turn_sections == null:
+		turn_sections = []
+		var saved = _swap_in_fresh_panel()
+		_activate_extra()
+		var jd = _juke_dir(extra_node)
+		if jd != null:
+			for row in WAY_ROWS:
+				var any = false
+				for d in row:
+					any = any or not jd.get_node("%" + d).disabled
+				turn_sections.append(any)
+		_swap_back_panel(saved)
+	return turn_sections
+
+
+func _set_turn_sections():
+	var jd = _juke_dir(extra_node)
+	if jd == null:
+		return
+	var rows = _turn_sections()
+	for r in range(rows.size()):
+		jd.get_node("%" + WAY_ROWS[r][1]).get_parent().visible = rows[r]
+
+
+# --- L2: fine aim (xy) and fine DI for every seat (di_fine_all) ---------------------------------------------------
+
+# The move's data node as this epoch has it (opened if it isn't yet; an open node is not re-opened).
+func _node_now(state):
+	return data_nodes[state.name] if data_nodes.has(state.name) else _open_data_node(state)
+
+
+func _widgets_of(node):
+	var ws = []
+	_find_widgets(node, ws)
+	return ws
+
+
+# A widget's value as the reference reads it: an XY plot's point, a slider's or count's number.
+func _wvalue(w):
+	if w.kind == "xy":
+		return w.node.value_float
+	return _range_node(w).value
+
+
+# The data a widget sends (an aim step changes it or is no step).
+func _wdata(w):
+	if w.kind == "xy":
+		return JSON.print(w.node.get_data())
+	return str(int(_range_node(w).value))
+
+
+# A move's aimed widgets (cached per move): each visible non-mode data widget that is an XY plot, or a slider or count
+# that can take more values than the base list gives it, with those values as the widget takes them (`grid`: an XY
+# plot's angles from toward the opponent, counterclockwise; a slider's values, its default included). At most XY_SLOTS.
+func _aimed(state):
+	if aimed_cache.has(state.name):
+		return aimed_cache[state.name]
+	var out = []
+	if _has_data(state):
+		var node = _node_now(state)
+		var ws = _widgets_of(node)
+		var opp = fighter.get_opponent_dir()
+		for wi in range(ws.size()):
+			var w = ws[wi]
+			if not w.node.is_visible_in_tree() or w.kind in MODE_KINDS or out.size() >= XY_SLOTS:
+				continue
+			if w.kind == "xy":
+				var grid = []
+				var saved = _snap(w)
+				for v in _widget_values(w):
+					_apply(w, v)
+					var p = w.node.value_float
+					_unsnap(w, saved)
+					if _hypot(p.x, p.y) > 1e-9:
+						var a = _rel_angle_to(p.x, p.y, opp)
+						var dup = false
+						for g in grid:
+							dup = dup or abs(_norm7(g - a)) < 0.5
+						if not dup:
+							grid.append(a)
+				out.append({"child": wi, "grid": grid, "wrap": not w.node.limit_angle})
+			elif w.kind in ["slider", "count"]:
+				var rn = _range_node(w)
+				var grid = []
+				var saved = rn.value
+				for v in _widget_values(w):
+					rn.value = v
+					if not rn.value in grid:
+						grid.append(rn.value)
+					rn.value = saved
+				if not rn.value in grid:
+					grid.append(rn.value)
+				var span = rn.max_value - rn.min_value
+				var n = floor(span / rn.step) + 1.0 if rn.step > 0 else floor(span) + 1.0
+				if grid.size() < n:
+					out.append({"child": wi, "grid": grid, "wrap": false})
+	aimed_cache[state.name] = out
+	return out
+
+
+func _xy_slot_path(xy, j):
+	return (xy >> (XY_BITS * j)) & ((1 << XY_BITS) - 1)
+
+
+# A packed xy value is valid: every slot below `slots` a base-5 path of at most XY_DEPTH digits, none 0, nothing above.
+func _xy_valid(xy, slots):
+	if slots < XY_SLOTS and xy >> (XY_BITS * slots) != 0:
+		return false
+	for j in range(min(slots, XY_SLOTS)):
+		var d = _path_digits(_xy_slot_path(xy, j), 5)
+		if d.size() > XY_DEPTH or 0 in d:
+			return false
+	return true
+
+
+# From angle `a` (on the grid, within 0.5 degrees), the distance to the next grid angle to side `sign` (+1
+# counterclockwise), if any; around the circle when `wrap`, else measured from a cut in the middle of the grid's
+# widest gap (outside the plot's angle limit).
+func _grid_gap(a, side, grid, wrap):
+	var on = false
+	for g in grid:
+		on = on or abs(_norm7(g - a)) < 0.5
+	if not on:
+		return null
+	var cut = 0.0
+	if not wrap:
+		var s = []
+		for g in grid:
+			s.append(_fmod_floor(g, 360.0))
+		s.sort()
+		var best = -1.0
+		var at = 0.0
+		for k in range(s.size()):
+			var nxt = s[k + 1] if k + 1 < s.size() else s[0] + 360.0
+			if nxt - s[k] > best:
+				best = nxt - s[k]
+				at = s[k] + best / 2.0
+		cut = at
+	var m = null
+	for g in grid:
+		var d
+		if wrap:
+			d = _fmod_floor(side * (g - a), 360.0)
+		else:
+			d = side * (_fmod_floor(g - cut, 360.0) - _fmod_floor(a - cut, 360.0))
+		if d > 0.5 and d < 360.0:
+			m = d if m == null else min(m, d)
+	return m
+
+
+# One fine-aim step on an aimed widget at its current value, through the widget's own methods: true when the data it
+# sends changed. XY: digits 1/2 turn by -/+ XY_ANGLE_STEP / 2^level at the same length (gap fill at level 0), 3/4
+# change the length by -/+ XY_LENGTH_STEP / 2^level of the radius (not on an always_max plot; within (0, radius]).
+# Slider or count: 1/2 move half way to the next grid value below / above (or the widget's limit).
+func _aim_step7(w, a, digit, level):
+	var before = _wdata(w)
+	if w.kind == "xy":
+		var n = w.node
+		var p = n.value_float
+		var px = float(p.x)
+		var py = float(p.y)
+		var length = _hypot(px, py)
+		if length < 1e-9:
+			return false
+		var sc = float(1 << level)
+		var opp = fighter.get_opponent_dir()
+		var np
+		if digit == 1 or digit == 2:
+			var side = -1.0 if digit == 1 else 1.0
+			var ang = _rel_angle_to(px, py, opp)
+			var step = XY_ANGLE_STEP / sc
+			if level == 0:
+				var gap = _grid_gap(ang, side, a.grid, a.wrap)
+				if gap != null and gap > XY_GAP:
+					step = gap / 2.0
+			var rad = _radians(ang + side * step)
+			np = Vector2(cos(rad) * length * opp, -sin(rad) * length)
+		elif digit == 3 or digit == 4:
+			if n.always_max:
+				return false
+			var dl = XY_LENGTH_STEP * n.panel_radius / sc
+			var l2 = length - dl if digit == 3 else length + dl
+			if not (l2 > 1e-6 and l2 <= n.panel_radius + 1e-6):
+				return false
+			np = Vector2(px / length * l2, py / length * l2)
+		else:
+			return false
+		n.update_value(np, false, true)
+	elif w.kind in ["slider", "count"]:
+		var rn = _range_node(w)
+		var v = rn.value
+		var bound = null
+		if digit == 1:
+			for g in a.grid:
+				if g < v - 1e-9 and (bound == null or g > bound):
+					bound = g
+			if bound == null and rn.min_value < v:
+				bound = rn.min_value
+		elif digit == 2:
+			for g in a.grid:
+				if g > v + 1e-9 and (bound == null or g < bound):
+					bound = g
+			if bound == null and rn.max_value > v:
+				bound = rn.max_value
+		if bound == null:
+			return false
+		rn.value = v + (bound - v) / 2.0
+	else:
+		return false
+	return _wdata(w) != before
+
+
+# Aimed widget `a` of move `state` as recipe `r`'s settings leave it, its xy path `path` applied, then `extra` (a digit
+# at depth `level`, or 0). [true, its value] or [false]; the widget is put back.
+func _aimed_run(state, a, r, path, extra = 0, level = 0):
+	var node = _node_now(state)
+	var w = _widgets_of(node)[a.child]
+	var saved = _snap(w)
+	if r.widgets.has(a.child):
+		_apply(w, r.widgets[a.child])
+	var ok = true
+	var digits = _path_digits(path, 5)
+	for l in range(digits.size()):
+		if not _aim_step7(w, a, digits[l], l):
+			ok = false
+			break
+	if ok and extra != 0:
+		ok = _aim_step7(w, a, extra, level)
+	var v = _wvalue(w)
+	_unsnap(w, saved)
+	return [true, v] if ok else [false]
+
+
+# A widget's exact state, to put it back after a trial (the reference steps a copy of the widget): an XY plot's script
+# variables, a slider's or count's value.
+func _snap(w):
+	if w.kind != "xy":
+		return _range_node(w).value
+	var vars = {}
+	for p in w.node.get_script().get_script_property_list():
+		var v = w.node.get(p.name)
+		if typeof(v) != TYPE_OBJECT:
+			vars[p.name] = v.duplicate(true) if typeof(v) == TYPE_DICTIONARY or typeof(v) == TYPE_ARRAY else v
+	return vars
+
+
+func _unsnap(w, saved):
+	if w.kind != "xy":
+		_range_node(w).value = saved
+		return
+	for k in saved:
+		w.node.set(k, saved[k])
+
+
+# Recipe r's widget settings with its xy paths' final widget values set last, or why not.
+func _xy_settings(r):
+	var name = _name(r.state)
+	if r.state == null or not _has_data(r.state):
+		return "xy is not a factor of %s" % name
+	var aimed = _aimed(r.state)
+	if not _xy_valid(r.xy, aimed.size()):
+		return "xy %d is not a path of at most %d steps on each of %s's %d aimed widgets" % [r.xy, XY_DEPTH, name, aimed.size()]
+	var settings = r.widgets.duplicate()
+	for j in range(aimed.size()):
+		var p = _xy_slot_path(r.xy, j)
+		if p == 0:
+			continue
+		var res = _aimed_run(r.state, aimed[j], r, p)
+		if not res[0]:
+			return "xy %d has no step on %s's widget %d" % [r.xy, name, j]
+		settings.erase(aimed[j].child)
+		settings[aimed[j].child] = res[1]
+	return settings
+
+
+# Set 7's per-candidate factors and values: `xy` on a candidate of a move with aimed widgets (the paths one step longer
+# that exist), and `di_fine_all` on every candidate of a seat with DI enabled (not where set 5's di_fine steers it;
+# children only from a non-neutral DI).
+func _set7_meta(c, r):
+	if not (set7.get("xy_fine", false) or set7.get("di_fine_all", false)):
+		return
+	if r.state != null and set7.xy_fine and _has_data(r.state):
+		var aimed = _aimed(r.state)
+		if not aimed.empty():
+			var kids = []
+			for j in range(aimed.size()):
+				var p = _xy_slot_path(r.xy, j)
+				var depth = _path_digits(p, 5).size()
+				if depth >= XY_DEPTH:
+					continue
+				if not _aimed_run(r.state, aimed[j], r, p)[0]:
+					continue
+				for digit in [1, 2, 3, 4]:
+					if _aimed_run(r.state, aimed[j], r, p, digit, depth)[0]:
+						kids.append(r.xy + ((digit * int(pow(5, depth))) << (XY_BITS * j)))
+			c.factors["xy"] = kids
+			c.values["xy"] = r.xy
+	var bullet = _s5("bullet_di") and d5.owns_bullet
+	if set7.di_fine_all and not bullet and fighter.di_enabled:
+		var di = c.extra.get("DI", {})
+		var x = int(di.get("x", 0))
+		var y = int(di.get("y", 0))
+		var depth = _path_digits(r.di_fine_all, 5).size()
+		var kids = []
+		if (x != 0 or y != 0) and depth < DI_ALL_DEPTH:
+			for digit in [1, 2, 3, 4]:
+				if _di_step(x, y, digit, depth) != null:
+					kids.append(r.di_fine_all + digit * int(pow(5, depth)))
+		c.factors["di_fine_all"] = kids
+		c.values["di_fine_all"] = r.di_fine_all
+
+
+# --- L3: moves with two or more XY widgets ---------------------------------------------------------------------
+
+# A move's XY slots ([widget index, its grid values]) when it shows two or more XY data widgets; else [].
+func _multi_xy(state):
+	if not _has_data(state):
+		return []
+	var node = _open_data_node(state)
+	var ws = _widgets_of(node)
+	var out = []
+	for wi in range(ws.size()):
+		if ws[wi].kind == "xy" and ws[wi].node.is_visible_in_tree():
+			out.append([wi, _widget_values(ws[wi])])
+	return out if out.size() >= 2 else []
+
+
+# multi_xy_base: a multi-XY move's same-value entries after its variants: for each grid value g of its first XY widget
+# (grid order), every XY widget set to g (skipped when a widget's grid lacks g); data repeats dropped.
+func _same_value_entries(state, recs):
+	var slots = _multi_xy(state)
+	if slots.empty() or recs.empty():
+		return
+	var k = recs[0].extra_set
+	var seen = {}
+	for r in recs:
+		if r.data != null:
+			seen[JSON.print(r.data)] = true
+	for g in slots[0][1]:
+		var all = true
+		for s in slots:
+			all = all and g in s[1]
+		if not all:
+			continue
+		var settings = {}
+		for s in slots:
+			settings[s[0]] = g
+		var data = _data_for(state, settings, false)
+		var key = JSON.print(data)
+		if seen.has(key):
+			continue
+		seen[key] = true
+		recs.append(_recipe(state, settings, k, data))
+
+
+func _xy_grid_slot(v, j):
+	return (v >> (4 * j)) & 15
+
+
+# Whether XY widget `wi` still reads its value once `settings` are applied in order (the widgets are put back).
+func _xy_at_default(node, settings, wi):
+	var ws = _widgets_of(node)
+	if ws[wi].kind != "xy":
+		return false
+	var before = ws[wi].node.value_float
+	var saved = []
+	for j in settings:
+		saved.append([j, _save(ws[j])])
+		_apply(ws[j], settings[j])
+	var same = ws[wi].node.value_float == before
+	saved.invert()
+	for s in saved:
+		_restore(ws[s[0]], s[1])
+	return same
+
+
+# The slots of a multi-XY move a recipe leaves at their defaults (no xy_grid index, no xy path on that widget, and the
+# widget reads its value after the recipe's settings).
+func _xy_default_slots(r, slots):
+	var refined = []
+	if r.xy != 0 and (set7.xy_fine or set7.di_fine_all):
+		var aimed = _aimed(r.state)
+		for j in range(aimed.size()):
+			if _xy_slot_path(r.xy, j) != 0:
+				refined.append(aimed[j].child)
+	var node = _open_data_node(r.state)
+	var out = []
+	for j in range(slots.size()):
+		var wi = slots[j][0]
+		out.append(_xy_grid_slot(r.xy_grid, j) == 0 and not wi in refined and _xy_at_default(node, r.widgets, wi))
+	return out
+
+
+# multi_xy: r with xy_grid value v (absolute). Each slot that changes must be one the recipe leaves at its default; its
+# widget is set to that grid value. "" or why not.
+func _apply_xy_grid(r, v):
+	var name = _name(r.state)
+	var slots = [] if r.state == null else _multi_xy(r.state)
+	if slots.empty():
+		return "xy_grid is not a factor of %s (it needs two or more XY widgets)" % name
+	var n = min(slots.size(), XY_GRID_SLOTS)
+	if n < XY_GRID_SLOTS and v >> (4 * n) != 0:
+		return "xy_grid %d names a slot %s doesn't have (%d XY widgets)" % [v, name, n]
+	var at_default = _xy_default_slots(r, slots)
+	r.widgets = r.widgets.duplicate()  # the recipe is a shallow copy of the base's
+	for j in range(n):
+		var old = _xy_grid_slot(r.xy_grid, j)
+		var nv = _xy_grid_slot(v, j)
+		if old == nv:
+			continue
+		if not at_default[j]:
+			return "xy_grid: %s's XY widget %d is not at its default" % [name, j]
+		if nv < 1 or nv > slots[j][1].size():
+			return "xy_grid: %s's XY widget %d has %d grid values, not %d" % [name, j, slots[j][1].size(), nv]
+		r.widgets[slots[j][0]] = slots[j][1][nv - 1]
+	r.xy_grid = v
+	r.data = null
+	return ""
+
+
+# multi_xy's per-candidate factor and value: on a candidate of a multi-XY move, `xy_grid` lists, for each slot still at
+# its default, every grid index (at most 15), and the candidate's own value.
+func _l3_meta(c, r):
+	if not set7.get("multi_xy", false) or r.state == null:
+		return
+	var slots = _multi_xy(r.state)
+	if slots.empty():
+		return
+	var at_default = _xy_default_slots(r, slots)
+	var kids = []
+	for j in range(min(slots.size(), XY_GRID_SLOTS)):
+		if at_default[j]:
+			for gi in range(1, min(slots[j][1].size(), 15) + 1):
+				kids.append(r.xy_grid | (gi << (4 * j)))
+	c.factors["xy_grid"] = kids
+	c.values["xy_grid"] = r.xy_grid

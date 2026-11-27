@@ -9,17 +9,21 @@ extends Node
 #   --yomi-divergence-log=P  YOMI_DIVERGENCE_LOG   append one JSON line per turn whose preview of the
 #                                                  played pair differed from the real step
 #   --yomi-log=PATH          YOMI_LOG              append startup messages and errors to PATH
-#   --yomi-candidate-set=S   YOMI_CANDIDATE_SET    4 (default) or 5: the set hello reports and
-#                                                  new_match plays when it names none
+#   --yomi-candidate-set=S   YOMI_CANDIDATE_SET    4 (default), 5, 6 or 7: the set hello reports and
+#                                                  new_match plays when it names none (7: set 6 with
+#                                                  SET7_KEYS on, as the simulator plays set 7)
 #   --yomi-set5=SWITCHES     YOMI_SET5             set 5's switches: "all" (default), "none", or the
 #                                                  ones on, comma-separated (draw_pairs,gun_aim_fine,
 #                                                  bullet_di,draw_base)
 #   --yomi-set6=SWITCHES     YOMI_SET6             set 6's switches: "default" (pairs and clicks on for every
 #                                                  character, triples and toggle_only off), or the ones
 #                                                  changed from it, comma-separated, each name=0|1
-#                                                  (pairs_<c>, clicks_<c>, toggle_only_<c>, triples)
-#   --yomi-candidate-rules=H YOMI_CANDIDATE_RULES  a candidate_rules hash (set 4's or a set-5
-#                                                  combination's): picks the set and switches it names,
+#                                                  (pairs_<c>, clicks_<c>, toggle_only_<c>, triples, and
+#                                                  SET6_EXTRA_KEYS, e.g. switch_sets=1)
+#   --yomi-candidate-rules=H YOMI_CANDIDATE_RULES  a candidate_rules hash (set 4's, a set-5 combination's,
+#                                                  set 6's with each set-5 combination or with any
+#                                                  SET6_EXTRA_KEYS combination, set 7's among them):
+#                                                  picks the set and switches it names,
 #                                                  so a recorded game's server can be started from its
 #                                                  header (overrides the two above)
 #   --yomi-legality=MODE     YOMI_LEGALITY         copy (default) | game: which moves are legal comes
@@ -51,13 +55,19 @@ const ENGINE_VERSION = "2"  # 2: standard online settings, timing and raw state
 # 3: feint, reverse, extra toggles, dash timing steps; 4: every variant, factors + expand;
 # 5: set 4 plus four Cowboy additions, each behind a switch (Candidates.gd, README "Candidate set 5")
 var CANDIDATE_SET = "4"   # this server's default set (--yomi-candidate-set)
-const CANDIDATE_SETS = ["6", "5", "4", "2"]
+const CANDIDATE_SETS = ["7", "6", "5", "4", "2"]
 const SET5_KEYS = ["draw_pairs", "gun_aim_fine", "bullet_di", "draw_base"]  # bit k of a combination
 var set5 = {}             # set 5's switches, every set-5 seat on this server
 const SET6_KEYS = ["pairs_ninja", "pairs_cowboy", "pairs_wizard", "pairs_mutant", "pairs_robot", "triples",
 	"toggle_only_ninja", "toggle_only_cowboy", "toggle_only_wizard", "toggle_only_mutant", "toggle_only_robot",
 	"clicks_ninja", "clicks_cowboy", "clicks_wizard", "clicks_mutant", "clicks_robot"]
-var set6 = {}             # set 6's switches, every set-6 seat on this server
+# Switches outside the 16, in the simulator's rules-text order (its S6::EXTRA_KEYS): each is appended to the rules'
+# `set6` object only when on, so every combination has its own hash and the hashes with them all off are set 6's.
+const SET6_EXTRA_KEYS = ["juke_sections", "l1_pool", "xy_fine", "di_fine_all", "multi_xy_base", "multi_xy", "l1_panel_dirs",
+	"switch_sets"]
+# Set 7 as the fleet plays it: set 6 with these on (rules ff2f16e0ef3f; with switch_sets too, d1bd8211465b).
+const SET7_KEYS = ["juke_sections", "l1_pool", "xy_fine", "di_fine_all", "multi_xy_base", "multi_xy"]
+var set6 = {}             # set 6's switches (SET6_KEYS and SET6_EXTRA_KEYS), every set-6 seat on this server
 var rules_tokens = {}     # rules file name -> its tokens (_rules_text), for the set-6 hashes computed on demand
 var rules_alias = {}      # rules_aliases.json: computed hash -> the frozen hash it stands for
 var rules_hashes = {}     # "4" and "5:<bits>" -> candidate_rules
@@ -171,9 +181,11 @@ func _boot():
 		candidate_rules = rules_hashes["4"]
 	elif CANDIDATE_SET == "6":
 		candidate_rules = set6_hash(set5, set6)
+	elif CANDIDATE_SET == "7":
+		candidate_rules = set6_hash(set5, set7_switches(set6))
 	else:
 		candidate_rules = rules_hashes["5:%d" % _set5_bits()]
-	if CANDIDATE_SET in ["5", "6"]:
+	if CANDIDATE_SET in ["5", "6", "7"]:
 		mod_md5 += candidate_rules.substr(0, 8)  # a fingerprint per switch combination
 	if match_settings.empty():
 		_log("YOMIBENCH_ERROR could not read the game's default match settings")
@@ -207,12 +219,12 @@ func _pick_set():
 	if spec6 != "default":
 		for kv in spec6.split(","):
 			var parts = kv.strip_edges().split("=")
-			if parts.size() != 2 or not parts[0] in SET6_KEYS or not parts[1] in ["0", "1"]:
-				return "set-6 switches are name=0|1, comma-separated (have %s), not %s" % [str(SET6_KEYS), kv]
+			if parts.size() != 2 or not (parts[0] in SET6_KEYS or parts[0] in SET6_EXTRA_KEYS) or not parts[1] in ["0", "1"]:
+				return "set-6 switches are name=0|1, comma-separated (have %s), not %s" % [str(SET6_KEYS + SET6_EXTRA_KEYS), kv]
 			set6[parts[0]] = parts[1] == "1"
 	CANDIDATE_SET = _option("candidate-set", CANDIDATE_SET)
-	if not CANDIDATE_SET in ["4", "5", "6"]:
-		return "candidate set must be 4, 5 or 6, not %s" % CANDIDATE_SET
+	if not CANDIDATE_SET in ["4", "5", "6", "7"]:
+		return "candidate set must be 4, 5, 6 or 7, not %s" % CANDIDATE_SET
 	var want = _option("candidate-rules", "")
 	if want != "":
 		if want == rules_hashes["4"]:
@@ -234,6 +246,19 @@ func _pick_set():
 				set5 = s5
 				set6 = _set6_default()
 				return ""
+		# Set 6's default with each combination of the switches outside the 16, set 5 all on (set 7's hashes).
+		var all5 = {}
+		for k in SET5_KEYS:
+			all5[k] = true
+		for bx in range(1 << SET6_EXTRA_KEYS.size()):
+			var s6 = _set6_default()
+			for k in range(SET6_EXTRA_KEYS.size()):
+				s6[SET6_EXTRA_KEYS[k]] = bx & (1 << k) != 0
+			if want == set6_hash(all5, s6):
+				CANDIDATE_SET = "6"
+				set5 = all5
+				set6 = s6
+				return ""
 		return "no candidate set here has rules %s" % want
 	return ""
 
@@ -250,11 +275,21 @@ func _pick_legality():
 	return ""
 
 
-# Set 6 as released: every character's pairs and single clicks on, triples and toggle_only off.
+# Set 6 as released: every character's pairs and single clicks on, triples, toggle_only and the extra switches off.
 func _set6_default():
 	var d = {}
 	for k in SET6_KEYS:
 		d[k] = k.begins_with("pairs_") or k.begins_with("clicks_")
+	for k in SET6_EXTRA_KEYS:
+		d[k] = false
+	return d
+
+
+# Set 7's switches: these set-6 switches with SET7_KEYS on.
+func set7_switches(s6):
+	var d = s6.duplicate()
+	for k in SET7_KEYS:
+		d[k] = true
 	return d
 
 
@@ -266,6 +301,16 @@ func set6_hash(s5, s6):
 		t = t.replace('"%s":true' % k, '"%s":%s' % [k, "true" if s5[k] else "false"])
 	for k in SET6_KEYS:
 		t = t.replace('"%s":true' % k, '"%s":%s' % [k, "true" if s6[k] else "false"])
+	# The switches outside the 16 that are on, appended to `set6` after clicks_robot (its last key), in order.
+	var tail = ""
+	for k in SET6_EXTRA_KEYS:
+		if s6.get(k, false):
+			tail += ',"%s":true' % k
+	if tail != "":
+		var last = '"clicks_robot":%s}' % ("true" if s6["clicks_robot"] else "false")
+		if t.count(last) != 1:
+			push_error("YomiBench: candidate_rules_v6.json's set6 doesn't end with clicks_robot")
+		t = t.replace(last, last.substr(0, last.length() - 1) + tail + "}")
 	var h = (t + rules_tokens["Candidates4.gd"]).md5_text().substr(0, 12)
 	return rules_alias.get(h, h)
 
@@ -437,7 +482,7 @@ func _handle_line(line, cmd_out):
 			"candidate_set": CANDIDATE_SET, "candidate_rules": candidate_rules,
 			# Set 5's switches and their hash: what a seat on set "5" plays (new_match candidate_sets).
 			"set5": set5, "set5_rules": rules_hashes["5:%d" % _set5_bits()],
-			"set6": set6, "set6_rules": set6_hash(set5, set6),
+			"set6": set6, "set6_rules": set6_hash(set5, set6), "set7_rules": set6_hash(set5, set7_switches(set6)),
 			"copy_mode": copy_mode, "match_settings": match_settings, "mod_md5": mod_md5,
 			"legality": legality, "legality_check": legality_check != "",
 		}
@@ -516,6 +561,17 @@ func _handle_line(line, cmd_out):
 					p.erase(key)
 			out.append(match_.probe(int(p.seat), p))
 		return {"results": out}
+	if cmd == "toggle_pool":
+		# Set 7 L1: one seat's toggle pool (Candidates.toggle_pool), the values expand takes for each listed move.
+		var seat = msg.get("seat")
+		if not (typeof(seat) in [TYPE_INT, TYPE_REAL]) or not seat in [0, 1]:
+			return _err("bad_request", "toggle_pool needs seat 0 or 1")
+		if match_.done():
+			return _err("match_over", "the match has ended")
+		var tp = match_.toggle_pool(int(seat))
+		if tp.has("error"):
+			return _err("bad_request", tp.error)
+		return tp
 	if cmd == "step":
 		var ids = _parse_pair(msg.get("actions"), true)
 		if typeof(ids) == TYPE_STRING:
@@ -628,7 +684,7 @@ func _new_match(msg):
 		elif typeof(sets[i]) != TYPE_STRING:
 			return _err("bad_request", "candidate sets must be integers or strings")
 		if not sets[i] in CANDIDATE_SETS:
-			return _err("bad_request", "candidate sets available: 6, 5, 4 and 2")
+			return _err("bad_request", "candidate sets available: 7, 6, 5, 4 and 2")
 	# Validate the whole request before replacing the live match.
 	var next_handle = 1  # handle ids never repeat across matches, so an old one is stale, not reused
 	if match_ != null:
@@ -641,7 +697,8 @@ func _new_match(msg):
 	match_.legality_check = legality_check
 	match_.legality_counts = legality_counts
 	add_child(match_)
-	match_.start(p1, p2, int(seed_), int(cap), settings, copy_mode, divergence_log, divergence, sets, set5, set6)
+	match_.start(p1, p2, int(seed_), int(cap), settings, copy_mode, divergence_log, divergence, sets, set5, set6,
+		set7_switches(set6))
 	var obs = match_.observation(msg.get("detail") == true)
 	obs.state["raw_start"] = match_.raw_start  # full start values; later states send changes only
 	return obs
