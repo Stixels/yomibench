@@ -61,7 +61,7 @@ var set5 = {}             # set 5's switches, every set-5 seat on this server
 const SET6_KEYS = ["pairs_ninja", "pairs_cowboy", "pairs_wizard", "pairs_mutant", "pairs_robot", "triples",
 	"toggle_only_ninja", "toggle_only_cowboy", "toggle_only_wizard", "toggle_only_mutant", "toggle_only_robot",
 	"clicks_ninja", "clicks_cowboy", "clicks_wizard", "clicks_mutant", "clicks_robot"]
-# Switches outside the 16, in the simulator's rules-text order (its S6::EXTRA_KEYS): each is appended to the rules'
+# Switches outside the 16, in the simulator's rules-text order: each is appended to the rules'
 # `set6` object only when on, so every combination has its own hash and the hashes with them all off are set 6's.
 const SET6_EXTRA_KEYS = ["juke_sections", "l1_pool", "xy_fine", "di_fine_all", "multi_xy_base", "multi_xy", "l1_panel_dirs",
 	"switch_sets"]
@@ -571,6 +571,8 @@ func _handle_line(line, cmd_out):
 				return _err("bad_request", "extra_set_widgets needs seat, candidate and extra_set")
 		if not seat in [0, 1]:
 			return _err("bad_request", "seat must be 0 or 1")
+		if match_.done():
+			return _err("match_over", "the match has ended")
 		var esw = match_.extra_set_widgets(int(seat), int(base), int(k))
 		if esw.has("error"):
 			return _err("bad_request", esw.error)

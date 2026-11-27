@@ -1466,6 +1466,10 @@ func probe(spec):
 	var res = _probe(spec)
 	_restore_extra(saved_extra)
 	_activate_extra()
+	if not res.has("error"):
+		# The probe joins this decision's list (YomiMatch.probe), so it takes a slot in d5.keys: a key's index stays
+		# its candidate id for expand's "same candidate as %d". The slot matches no key (a probe is never repeated).
+		d5.keys.append("probe")
 	return res
 
 

@@ -99,19 +99,28 @@ def test_real_probe_is_fresh_and_refuses_disabled_di(tmp_path):
     server = game.GameServer(run_dir=tmp_path / "run", below_normal=True,
                              extra_args=["--yomi-candidate-set=7", "--yomi-set6=switch_sets=1"])
     engine = game.connect_server(server.port, owned=server)
-    if sys.platform == "win32":  # the engine raises itself to AboveNormal as it starts (VsBot.gd _lower_priority)
+    if sys.platform == "win32":  # the game raises itself to AboveNormal as it starts; put it back
         import ctypes
+        from ctypes import wintypes
 
-        h = ctypes.windll.kernel32.OpenProcess(0x0600, False, server.proc.pid)
-        ctypes.windll.kernel32.SetPriorityClass(h, 0x4000)
-        ctypes.windll.kernel32.CloseHandle(h)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = k32.OpenProcess(0x0600, False, server.proc.pid)
+        if h:
+            k32.SetPriorityClass(h, 0x4000)
+            k32.CloseHandle(h)
     try:
         call = engine._call
         assert engine.hello()["candidate_rules"] == SET7_SWITCH
         # A probe of a switch or panel value's widget clicks gives the expanded candidate's extras, whatever the
         # expands, previews and probes before it left in the panel (the live compare's FlyDir memory, a juke left set).
+        # A probe giving a listed or expanded candidate's exact input carries that candidate's metadata, and a probe
+        # leaves expand's repeat answers ("same candidate as N") naming the candidate's own id.
         rng = random.Random(3)
-        compared = 0
+        compared = with_meta = repeats = 0
         for seed, (p1, p2) in enumerate([("Robot", "Mutant"), ("Mutant", "Robot")]):
             obs = call({"cmd": "new_match", "p1": p1, "p2": p2, "seed": 500 + seed, "settings": STD})
             for _turn in range(25):
@@ -119,6 +128,7 @@ def test_real_probe_is_fresh_and_refuses_disabled_di(tmp_path):
                     break
                 for seat in range(2):
                     cands = obs["candidates"][seat]
+                    seen = list(cands)  # this decision's list for the seat, as the engine holds it
                     for move in call({"cmd": "toggle_pool", "seat": seat})["moves"]:
                         # pool-only values (switch sets, L1 triples) are made on a fresh panel, as a probe makes them;
                         # a move's own sets are read off the working panel, as set 4 reads them
@@ -130,6 +140,8 @@ def test_real_probe_is_fresh_and_refuses_disabled_di(tmp_path):
                                                                   "extra_override": {"extra_set": k}}]})["results"][0]
                             if "candidate" not in e:
                                 continue
+                            assert e["id"] == len(seen)
+                            seen.append(e["candidate"])
                             call({"cmd": "preview", "pairs": [[rng.randrange(len(obs["candidates"][0])),
                                                                rng.randrange(len(obs["candidates"][1]))]]})
                             p = call({"cmd": "probe", "probes": [{"seat": seat, "action": move["action"],
@@ -139,9 +151,28 @@ def test_real_probe_is_fresh_and_refuses_disabled_di(tmp_path):
                             want = {key: v for key, v in e["candidate"]["extra"].items() if key not in drop}
                             assert got == want, (p1, p2, move["action"], k, w)
                             compared += 1
+                            pc = p["candidate"]
+                            assert p["id"] == len(seen)
+                            same = [o for o in seen if "values" in o and json.dumps([o["action"], o["data"], o["extra"]],
+                                    sort_keys=True) == json.dumps([pc["action"], pc["data"], pc["extra"]], sort_keys=True)]
+                            if same:
+                                o = same[0]
+                                assert (pc["factors"], pc["values"]) == (o["factors"], o["values"])
+                                assert pc["base"] == (o["id"] if o.get("base") is None else o["base"])
+                                with_meta += 1
+                            else:
+                                assert "factors" not in pc and "values" not in pc
+                            seen.append(pc)
+                            again = call({"cmd": "expand", "specs": [{"seat": seat, "candidate": move["candidate"],
+                                                                      "extra_override": {"extra_set": k}}]})["results"][0]
+                            if "error" in again and again["error"].startswith("same candidate as "):
+                                assert again["error"] == "same candidate as %d" % e["id"]
+                                repeats += 1
+                            elif "candidate" in again:
+                                seen.append(again["candidate"])
                 obs = call({"cmd": "step", "actions": [rng.randrange(len(obs["candidates"][0])),
                                                        rng.randrange(len(obs["candidates"][1]))]})
-        assert compared > 50
+        assert compared > 50 and with_meta > 0 and repeats > 0, (compared, with_meta, repeats)
         # DI: a probe with DI is refused while DI is disabled, as step_raw refuses that input.
         call({"cmd": "new_match", "p1": "Cowboy", "p2": "Ninja", "seed": 1, "settings": {**STD, "di_enabled": False}})
         r = call({"cmd": "probe", "probes": [{"seat": 0, "action": "Continue", "di": {"x": 1.0, "y": 0.0}}]})
