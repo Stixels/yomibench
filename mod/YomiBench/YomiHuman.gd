@@ -168,6 +168,12 @@ var card_hidden = false
 var result_in = false    # the bot's record of the finished match arrived (Rematch waits for it)
 var ended_msec = 0       # when the match ended: the card waits a moment so the final hit stays visible
 const CARD_DELAY_MS = 1500
+var hud_reshow_in = 0    # HUD re-show (_hud_reshow_frame): open-turn frames left before the layer is hidden; 0: none
+var hud_hidden_frames = 0  # frames left with the layer hidden by the re-show; 0: not hidden by it
+var hud_hidden_msec = 0  # when the re-show hid it
+const HUD_RESHOW_FRAMES = 3
+const HUD_HIDDEN_FRAMES = 3
+const HUD_HIDDEN_MS = 50
 var forfeiter = 0        # the match ended on a forfeit by this player (1 or 2), else 0
 var pause_hid = []       # our controls hidden while the game's pause menu is open
 var chat_game = null     # the game whose chat box was closed (the post-game replay is a new one)
@@ -281,6 +287,7 @@ func _process(_delta):
 			_attach()
 		"playing":
 			_play_frame()
+	_hud_reshow_frame()
 	_update_status()
 
 
@@ -570,7 +577,11 @@ func _launch(msg):
 	ReplayManager.playback = false
 	ReplayManager.resimulating = false
 	ReplayManager.replaying_ingame = false
+	# Set when a match ends (the post-game replay plays in full); the game's bottom bar reads it to put both players'
+	# info and super meters in the bottom bar instead of across the top, so a second match opened with them moved.
+	ReplayManager.play_full = false
 	Global.frame_advance = false
+	_hud_reshow_end()
 	main.ui_layer.reset_ui()
 	if is_instance_valid(main.game):
 		main.game.free()
@@ -614,6 +625,59 @@ func _launch(msg):
 	main._on_match_ready(data)
 	if side == "host" and link != null:
 		link.trace("match_ready returned")
+
+
+# After a match the HUD layer's children (health bars, names, portraits, combo counter) can stay hidden while the layer
+# itself says visible, so a second match opened without them. Hiding the layer and showing it again a moment later
+# makes its children follow it; hidden and shown in the same frame they stay hidden (checked in the game), first
+# match included. Not in _launch or _attach: the game hides them again after both (its deferred setup, the match's
+# start). So, every frame: HUD_RESHOW_FRAMES frames into the first open turn the layer is hidden (unless the player
+# hid it, F1), and once it has been hidden HUD_HIDDEN_FRAMES frames and HUD_HIDDEN_MS (the frame rate can be high) it is
+# shown again, whatever the match does meanwhile. A match that ends before the hide skips it.
+func _hud_reshow_frame():
+	if hud_hidden_frames > 0:
+		hud_hidden_frames -= 1
+		if hud_hidden_frames == 0:
+			if OS.get_ticks_msec() - hud_hidden_msec < HUD_HIDDEN_MS:
+				hud_hidden_frames = 1
+			else:
+				_hud_visible(true)
+		return
+	if hud_reshow_in <= 0:
+		return
+	if phase != "playing":
+		hud_reshow_in = 0
+		return
+	if not is_instance_valid(game) or not game.game_paused:
+		return
+	hud_reshow_in -= 1
+	if hud_reshow_in > 0:
+		return
+	var hud = _hud()
+	if hud == null or not hud.visible:  # hidden by the player: left as it is
+		return
+	hud.visible = false
+	hud_hidden_frames = HUD_HIDDEN_FRAMES
+	hud_hidden_msec = OS.get_ticks_msec()
+
+
+# A re-show in progress ends now (a new match is starting): the layer is shown if the re-show hid it.
+func _hud_reshow_end():
+	if hud_hidden_frames > 0:
+		_hud_visible(true)
+	hud_hidden_frames = 0
+	hud_reshow_in = 0
+
+
+func _hud():
+	var hud = main.get("hud_layer") if is_instance_valid(main) else null
+	return hud if is_instance_valid(hud) and hud is CanvasLayer else null
+
+
+func _hud_visible(on):
+	var hud = _hud()
+	if hud != null:
+		hud.visible = on
 
 
 # The standard settings with a preset's overrides, each in the type the game's own setting has
@@ -720,6 +784,8 @@ func _attach():
 	if not is_instance_valid(main) or not is_instance_valid(main.game) or not main.game.game_started:
 		return
 	game = main.game
+	if side != "client":  # the bot's copy has no screen
+		hud_reshow_in = HUD_RESHOW_FRAMES  # re-shown early in the first open turn (_hud_reshow_frame)
 	p1_panel = main.get_node("%P1ActionButtons")
 	p2_panel = main.get_node("%P2ActionButtons")
 	if side == "host":  # P2's moves come from the other game, through the game's own protocol
