@@ -168,8 +168,9 @@ var card_hidden = false
 var result_in = false    # the bot's record of the finished match arrived (Rematch waits for it)
 var ended_msec = 0       # when the match ended: the card waits a moment so the final hit stays visible
 const CARD_DELAY_MS = 1500
-var hud_reshow_in = 0    # frames into the first open turn until the HUD layer is re-shown (_reshow_hud); 0: done
-const HUD_RESHOW_FRAMES = 5
+var hud_reshow_in = 0    # frames into the first open turn left in the HUD re-show (_hud_visible); 0: done
+const HUD_RESHOW_FRAMES = 6  # hidden HUD_RESHOW_GAP frames before the end, shown at the end
+const HUD_RESHOW_GAP = 3
 var forfeiter = 0        # the match ended on a forfeit by this player (1 or 2), else 0
 var pause_hid = []       # our controls hidden while the game's pause menu is open
 var chat_game = null     # the game whose chat box was closed (the post-game replay is a new one)
@@ -284,8 +285,10 @@ func _process(_delta):
 		"playing":
 			if hud_reshow_in > 0 and is_instance_valid(game) and game.game_paused:
 				hud_reshow_in -= 1
-				if hud_reshow_in == 0:
-					_reshow_hud()
+				if hud_reshow_in == HUD_RESHOW_GAP:
+					_hud_visible(false)
+				elif hud_reshow_in == 0:
+					_hud_visible(true)
 			_play_frame()
 	_update_status()
 
@@ -626,14 +629,14 @@ func _launch(msg):
 
 
 # After a match the HUD layer's children (health bars, names, portraits, combo counter) can stay hidden while the layer
-# itself says visible, so a second match opened without them. Hiding and showing the layer again makes its children
-# follow it. Not in _launch or _attach: the game hides them again after both (its deferred setup, the match's start),
-# so it runs HUD_RESHOW_FRAMES frames into the first open turn. Harmless on a first match.
-func _reshow_hud():
-	var hud = main.get("hud_layer")
+# itself says visible, so a second match opened without them. Hiding the layer and showing it again a few frames later
+# makes its children follow it; hidden and shown in the same frame they stay hidden (checked in the game), first
+# match included. Not in _launch or _attach: the game hides them again after both (its deferred setup, the match's
+# start), so _process does it in the first open turn (hud_reshow_in).
+func _hud_visible(on):
+	var hud = main.get("hud_layer") if is_instance_valid(main) else null
 	if hud is CanvasLayer:
-		hud.visible = false
-		hud.visible = true
+		hud.visible = on
 
 
 # The standard settings with a preset's overrides, each in the type the game's own setting has
