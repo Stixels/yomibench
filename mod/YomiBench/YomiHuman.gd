@@ -168,6 +168,8 @@ var card_hidden = false
 var result_in = false    # the bot's record of the finished match arrived (Rematch waits for it)
 var ended_msec = 0       # when the match ended: the card waits a moment so the final hit stays visible
 const CARD_DELAY_MS = 1500
+var hud_reshow_in = 0    # frames into the first open turn until the HUD layer is re-shown (_reshow_hud); 0: done
+const HUD_RESHOW_FRAMES = 5
 var forfeiter = 0        # the match ended on a forfeit by this player (1 or 2), else 0
 var pause_hid = []       # our controls hidden while the game's pause menu is open
 var chat_game = null     # the game whose chat box was closed (the post-game replay is a new one)
@@ -280,6 +282,10 @@ func _process(_delta):
 		"starting":
 			_attach()
 		"playing":
+			if hud_reshow_in > 0 and is_instance_valid(game) and game.game_paused:
+				hud_reshow_in -= 1
+				if hud_reshow_in == 0:
+					_reshow_hud()
 			_play_frame()
 	_update_status()
 
@@ -620,8 +626,9 @@ func _launch(msg):
 
 
 # After a match the HUD layer's children (health bars, names, portraits, combo counter) can stay hidden while the layer
-# itself says visible, so a second match opened without them. Hiding and showing the layer again, once the match has
-# started (_attach), makes its children follow it. Harmless on a first match.
+# itself says visible, so a second match opened without them. Hiding and showing the layer again makes its children
+# follow it. Not in _launch or _attach: the game hides them again after both (its deferred setup, the match's start),
+# so it runs HUD_RESHOW_FRAMES frames into the first open turn. Harmless on a first match.
 func _reshow_hud():
 	var hud = main.get("hud_layer")
 	if hud is CanvasLayer:
@@ -733,7 +740,7 @@ func _attach():
 	if not is_instance_valid(main) or not is_instance_valid(main.game) or not main.game.game_started:
 		return
 	game = main.game
-	_reshow_hud()  # here, not in _launch: the game's deferred setup hides them again after _on_match_ready
+	hud_reshow_in = HUD_RESHOW_FRAMES  # re-shown a few frames into the first open turn (_process)
 	p1_panel = main.get_node("%P1ActionButtons")
 	p2_panel = main.get_node("%P2ActionButtons")
 	if side == "host":  # P2's moves come from the other game, through the game's own protocol
