@@ -44,15 +44,18 @@ Timed decisions keep their turn deadline only, except on a chess clock (ranked, 
 spends its bank about as the human spends theirs. While its bank has room above the reserve (`bank_reserve`, 60 s)
 it thinks until the human locks in, then at most `lock_cap` more (or less if its searches end), never past (bank
 left - reserve); with less room it plays on the floor, the per-turn deadline above (anytime.bank_budget). The
-production search may use that whole room; the optional deeper stages after it stop at the turn's share of the room,
-(bank left - reserve) / `bank_deep_turns` (anytime.bank_deep_s; 840 s of room: 8.4 s), since the game charges the
-bot's clock while it waits on the human. The production search's factor refinement also stops at a share,
+production search may use that whole room; the optional deeper stages after it get, counted from when the production
+search finishes, min(`bank_deep_cap`, (bank left - reserve) / `bank_deep_turns`) on a contested turn (both seats
+actionable or a Burst in play; anytime.bank_deep_after; 840 s of room: 25 s) and nothing on a routine one (one-sided
+or DI-only: it answers once its full search is done), since the game charges the bot's clock while it waits on the
+human. The production search's factor refinement also stops at a share,
 (bank left - reserve) / `bank_refine_turns` (anytime.bank_refine_s; 840 s of room: 21 s), and plays its latest
 converged answer; its base double oracle keeps the whole room. With the after-lock cap (untimed or bank), once the
 human has locked in and the search has a converged answer, the bot answers `lock_converged` (1.5 s) later instead of
 the full cap. The bank is the game's own P2 clock as the mod reads it at the turn's open
-(`bot_clock_s` in the decision), else the bot's model of it. Each decision logs `bank_left_s`, `budget_s`, `deep_s` and
-`mode` (bank | floor) in its `clock`.
+(`bot_clock_s` in the decision), else the bot's model of it. Each decision logs `bank_left_s`, `budget_s`, `deep_s`,
+`deep_kind` (contested | routine), `deep_from_s` (when the deeper stages' allowance started) and `mode` (bank | floor)
+in its `clock`.
 
 A forfeit (the game's pause menu): the mod's `end` carries `forfeit: 0` (P1, the human, forfeited) and the winner;
 the game is recorded as finished (`reason` "forfeit"), the sim's position as it was (its match never ended).
@@ -142,7 +145,7 @@ def set_cpu_use(use: str) -> bool:
 # argmax between them: with any weight on Burst it plays Burst with exactly its equilibrium probability. Argmax
 # starved Burst to 0% whenever one DI direction outweighed it (a lost game in the g16 human audit: 0 bursts in 166
 # turns, holding one, with Burst at 15-39% on eight turns of the final combo).
-BURST_ACTIONS = frozenset({"Burst", "DefensiveBurst"})
+BURST_ACTIONS = anytime.BURST_ACTIONS
 # Match settings presets (the panel's "Settings"): overrides of the standard online lobby's settings
 # (the sim's hello `match_settings`). The mod applies the chosen one to the real match and reports the
 # match's settings; the server starts the sim with whatever differs from standard (Engine.new_match's
@@ -503,6 +506,7 @@ class Session:
                  think_cap: float = anytime.THINK_CAP_S, lock_cap: float = anytime.LOCK_CAP_S,
                  bank_reserve: float = anytime.BANK_RESERVE_S,
                  bank_deep_turns: float = anytime.BANK_DEEP_TURNS,
+                 bank_deep_cap: float = anytime.BANK_DEEP_CAP_S,
                  lock_converged: float = anytime.LOCK_CONVERGED_S,
                  bank_refine_turns: float = anytime.BANK_REFINE_TURNS,
                  deadline_margin: float = anytime.DEADLINE_MARGIN_S,
@@ -534,6 +538,9 @@ class Session:
         if not bank_deep_turns > 0:
             raise ValueError(f"bank deep turns must be > 0: {bank_deep_turns}")
         self.bank_deep_turns = float(bank_deep_turns)
+        if not bank_deep_cap >= 0:
+            raise ValueError(f"the bank deep cap must be >= 0 s: {bank_deep_cap}")
+        self.bank_deep_cap = float(bank_deep_cap)
         if not lock_converged >= 0:
             raise ValueError(f"the converged after-lock stop must be >= 0 s (0: off): {lock_converged}")
         self.lock_converged = float(lock_converged)
@@ -826,15 +833,18 @@ class Session:
                                                self.deadline_fraction)
         if plan == "bank" and clock.hard_at is None:
             # The bank's room: the production search may use all of it (the hard stop), then the after-lock cap; never
-            # past the reserve. The optional deeper stages stop at this turn's share of the room (bank_deep_s): the
-            # game charges the bot's clock while it waits on the human, so thinking until every lock-in drained the
-            # bank to the floor in every g16 audit game.
+            # past the reserve. The optional deeper stages get this turn's share of the room (bank_deep_s), counted
+            # from when the production search finishes (Clock.deep_after), and only on a contested turn: _decide
+            # zeroes it on a routine one once it has the position (anytime.bank_deep_after). The game charges the
+            # bot's clock while it waits on the human, so thinking until every lock-in drained the bank to the floor
+            # in every g16 audit game; a share of what is left never does.
             available = budget
-            deep = anytime.bank_deep_s(bank, self.bank_reserve, self.bank_deep_turns)
+            deep = anytime.bank_deep_s(bank, self.bank_reserve, self.bank_deep_turns, self.bank_deep_cap)
             clock.hard_at = clock.t0 + budget
             clock.emergency_at = clock.t0 + anytime.emergency_within(budget, budget)
             clock.lock_cap = self.lock_cap
-            clock.cap_at = clock.t0 + min(budget, deep)
+            clock.cap_at = clock.t0 + min(budget, self.think_cap)
+            clock.deep_after = deep
             if self.bank_refine_turns > 0:
                 # The production search's refinement stops at this turn's share too (bank_refine_s), playing its
                 # latest converged answer; its base double oracle keeps the whole budget.
@@ -868,7 +878,10 @@ class Session:
                                 "bank_s": None if g.timer is None else round(g.timer.bank, 3),
                                 "bank_left_s": None if plan is None else round(bank, 3),
                                 "budget_s": None if budget is None else round(budget, 3), "mode": plan,
-                                "deep_s": None if deep is None else round(deep, 3)}
+                                "deep_s": None if clock.deep_after is None else round(clock.deep_after, 3),
+                                "deep_kind": clock.deep_kind,
+                                "deep_from_s": None if clock.deep_from is None
+                                else round(clock.deep_from - clock.t0, 3)}
 
     def _decide(self, g: Game, msg: dict[str, Any], turn: int, clock: anytime.Clock,
                 available: float | None) -> dict[str, Any]:
@@ -884,6 +897,10 @@ class Session:
             line.update({"state": obs.state if obs else None, "bot": None, "pick": g.pick})
             g.pending = line
             return {"type": "pick", "turn": turn, **g.pick, "fallback": True, "desynced": True}
+        if clock.deep_after is not None:  # a chess bank turn: routine turns answer once their full search is done
+            clock.deep_kind = "contested" if anytime.contested(obs) else "routine"
+            if clock.deep_kind == "routine":
+                clock.deep_after = 0.0
         t = time.perf_counter()
         depth = None
         think = bool(g.options.get("think_until_lockin"))
@@ -1349,8 +1366,12 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
                     help="ranked (a chess clock): the bot never plans its bank below this; with no more room it plays "
                          f"on the 15 s floor (default {anytime.BANK_RESERVE_S:g})")
     ap.add_argument("--bank-deep-turns", type=float, default=anytime.BANK_DEEP_TURNS, metavar="N",
-                    help="ranked (a chess clock): after its full search, the bot's deeper stages use at most 1/N of its "
-                         f"bank's room above the reserve per turn (default {anytime.BANK_DEEP_TURNS:g})")
+                    help="ranked (a chess clock): on a contested turn (both actionable, or a Burst in play), the bot's "
+                         "deeper stages get at most 1/N of its bank's room above the reserve, counted after its full "
+                         f"search; routine turns get none (default {anytime.BANK_DEEP_TURNS:g})")
+    ap.add_argument("--bank-deep-cap", type=float, default=anytime.BANK_DEEP_CAP_S, metavar="SECONDS",
+                    help="ranked (a chess clock): the most a contested turn's deeper stages get after the full search "
+                         f"(default {anytime.BANK_DEEP_CAP_S:g})")
     ap.add_argument("--lock-converged", type=float, default=anytime.LOCK_CONVERGED_S, metavar="SECONDS",
                     help="once you lock in and the bot's search has a converged answer, it answers within this many "
                          f"seconds instead of the full --lock-cap (default {anytime.LOCK_CONVERGED_S:g}; 0: off)")
@@ -1426,7 +1447,7 @@ def main(argv: list[str] | None = None) -> int:
                       settings=args.settings, think_until_lockin=args.think_until_lockin, think_cap=args.think_cap,
                       lock_cap=args.lock_cap, turn_timer=None if args.turn_timer is None else args.turn_timer == "on",
                       deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
-                      bank_reserve=args.bank_reserve, bank_deep_turns=args.bank_deep_turns,
+                      bank_reserve=args.bank_reserve, bank_deep_turns=args.bank_deep_turns, bank_deep_cap=args.bank_deep_cap,
                       lock_converged=args.lock_converged, bank_refine_turns=args.bank_refine_turns,
                       engine_spec=args.engine, quick_policy=load_quick_policy(args), floor=args.floor)
     server = Server(session, args.port, args.host)
