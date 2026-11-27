@@ -43,15 +43,23 @@ from typing import Any
 
 import numpy as np
 
-from yomibench import features, features_v2
+from yomibench import features, features_v2, features_v4
 from yomibench.features import Vocab
 from yomibench.search import terminal_value
 
 EMBED = {"state": 8, "stance": 4, "char": 4, "kind": 4, "ostate": 4}
-FEATURES = 3  # bump when features.encode changes; training always writes this version
+FEATURES = 3  # bump when features.encode changes; training writes 3 by default (4 with --inputs-v4)
 # Feature versions this code can play: version -> its encoder module (encode, CATEGORY_OF_SLOT).
 # Version 2 is checkpoint 1 and older, played with the frozen v2 encoder they were trained with.
-ENCODERS = {2: features_v2, 3: features}
+# Version 4 (inputs v4.1): version 3's columns then the features_ext block, first layer split
+# (w1 reads the v3 part, w1_ext the ext part). Registered by default so any worker/gate can load
+# v4 models without extra env vars; zero effect on v2/v3 models.
+ENCODERS = {2: features_v2, 3: features, 4: features_v4}
+EXT_W1 = "w1_ext"  # version 4's first-layer rows for the ext inputs (numbers, then ext categorical embeddings)
+
+
+def enable_inputs_v4() -> None:
+    ENCODERS[4] = features_v4
 
 
 V3_PLAYER_FIELDS = ("state_data", "combo_moves_used", "hitboxes")  # `di` stays: training filled it in
@@ -74,11 +82,11 @@ class ValueNet:
         self.vocab.frozen = True
         self.meta = meta
         self.version = meta.get("features", FEATURES)
-        self.encoder = ENCODERS[self.version]
+        self.encoder = ENCODERS[4].encoder_for(meta) if self.version == 4 else ENCODERS[self.version]
         # A v3 model trained on states without the engine-v3 move fields (e.g. sim records from a
         # build that doesn't send them) has only ever seen them off. Real-engine states carry them,
         # which would put its inputs outside training; play it the states it was trained on.
-        self.mask_v3_state = self.version == 3 and meta.get("state_v3_fraction", 0.0) < 0.5
+        self.mask_v3_state = self.version in (3, 4) and meta.get("state_v3_fraction", 0.0) < 0.5
         self.residual_hp = bool(meta.get("residual_hp", False))
         self.__name__ = f"valuenet:{meta.get('name', '?')}"
 
@@ -226,7 +234,8 @@ def n_layers(p: dict[str, np.ndarray]) -> int:
 
 
 def forward(p: dict[str, np.ndarray], nums: np.ndarray, cats: np.ndarray,
-            category_of_slot: list[str] = features.CATEGORY_OF_SLOT, head: str = "value") -> np.ndarray:
+            category_of_slot: list[str] = features.CATEGORY_OF_SLOT, head: str = "value",
+            fast: "FastInput | None" = None) -> np.ndarray:
     """The same computation as yomibench.train.Net.forward, in numpy. `head`: "value" (the
     output play uses), "aux" (the auxiliary hp-margin head, `w3_aux`/`b3_aux`) or "search" (the
     auxiliary search-value heads: rows x heads).
@@ -237,9 +246,17 @@ def forward(p: dict[str, np.ndarray], nums: np.ndarray, cats: np.ndarray,
     1e-3 (bullets_left 6 -> 6000) and saturate. Names a model never saw (an unseen character, its
     states and objects) encode as the unknown id 0, whose embedding row is the trained "none"
     row, as Vocab documents. So an unseen character is played as an unknown fighter whose own
-    fields are neutral; its shared fields (hp, position, state timing, meter, ...) still count."""
-    h = trunk(p, nums, cats, category_of_slot)
-    out = layer_keys(n_layers(p))[1]
+    fields are neutral; its shared fields (hp, position, state timing, meter, ...) still count.
+
+    `fast`: a FastInput built from these params (selfplay --fast-net-input; default off) computes the
+    first hidden layer from the raw inputs instead. Close to this computation, not bit for bit."""
+    hidden, out = layer_keys(n_layers(p))
+    if fast is not None:
+        h = fast(nums, cats)
+        for wk, bk in hidden[1:]:
+            h = np.maximum(h @ p[wk] + p[bk], 0)
+    else:
+        h = trunk(p, nums, cats, category_of_slot)
     if head == "search":
         return np.tanh(h @ p[SEARCH_W] + p[SEARCH_B])
     w, b = (p[out[0]], p[out[1]]) if head == "value" else (p["w3_aux"], p["b3_aux"])
@@ -248,13 +265,27 @@ def forward(p: dict[str, np.ndarray], nums: np.ndarray, cats: np.ndarray,
 
 def trunk(p: dict[str, np.ndarray], nums: np.ndarray, cats: np.ndarray,
           category_of_slot: list[str] = features.CATEGORY_OF_SLOT) -> np.ndarray:
-    """The last hidden layer's output, which every head reads (see forward for the inputs)."""
+    """The last hidden layer's output, which every head reads (see forward for the inputs).
+
+    A version-4 model (EXT_W1 in its params) splits the first layer: the v3 inputs (the first
+    features.N_NUMERIC numbers and features.N_CATEGORICAL ids) through w1 exactly as a version-3 model
+    computes them, plus the ext inputs through w1_ext. With w1_ext all zero (net surgery) the ext term is an
+    exact 0, so the outputs equal the parent's bit for bit."""
     x = [np.where(p["std"] <= CONSTANT_STD, 0.0, (nums - p["mean"]) / p["std"]).astype(np.float32)]
     for slot, cat in enumerate(category_of_slot):
         table = p[f"emb_{cat}"]
         x.append(table[np.minimum(cats[:, slot], len(table) - 1)])
-    h = np.concatenate(x, axis=1)
-    for wk, bk in layer_keys(n_layers(p))[0]:
+    hidden = layer_keys(n_layers(p))[0]
+    if EXT_W1 in p:
+        n3, c3 = features.N_NUMERIC, features.N_CATEGORICAL
+        std = x[0]
+        h3 = np.concatenate([std[:, :n3], *x[1:1 + c3]], axis=1)
+        hx = np.concatenate([std[:, n3:], *x[1 + c3:]], axis=1)
+        (wk, bk), hidden = hidden[0], hidden[1:]
+        h = np.maximum(h3 @ p[wk] + hx @ p[EXT_W1] + p[bk], 0)
+    else:
+        h = np.concatenate(x, axis=1)
+    for wk, bk in hidden:
         h = np.maximum(h @ p[wk] + p[bk], 0)
     return h
 
@@ -276,3 +307,90 @@ def candidate_heads(p: dict[str, np.ndarray], h: np.ndarray, cnums: np.ndarray, 
     s = np.broadcast_to(np.maximum(lin(h, "s"), 0)[:, None, :], c.shape)
     j = np.maximum(lin(np.concatenate([s, c, s * c], axis=-1), "j"), 0)
     return np.tanh(lin(j, "value"))[..., 0], lin(j, "logit")[..., 0]
+
+
+EXT_W1 = "w1_ext"  # inputs v4 (features/inputs-v4): the first layer's rows for the ext inputs, see FastInput
+FAST_TABLE_ROWS = 64  # FastInput's pre-multiplied tables up to this many rows a call, embeddings above it
+
+
+class FastInput:
+    """The first hidden layer of `p` with the input preparation folded into its weights, built once
+    per model (selfplay --fast-net-input; default off). `fast(nums, cats)` is forward's
+    relu(standardized nums @ W_num + embeddings @ W_emb + b1), computed as
+
+        relu(nums @ (W_num / std) + (b1 - (mean / std) @ W_num) + <the embedding term>)
+
+    so no per-call standardization and no concatenated input vector. The embedding term, by call size:
+    up to FAST_TABLE_ROWS rows, the sum over slots of T_slot[id] with T_slot = emb_<category> @ (that
+    slot's rows of W_emb) pre-multiplied, one gather for all slots (no matmul: fewest numpy calls); for
+    more rows, one gather per category (all its slots at once) into a reused buffer, times those rows of
+    W_emb (less memory traffic than hidden-width rows per slot). Inputs constant in training (std <=
+    CONSTANT_STD) get a zero weight row, as forward feeds them 0; ids past a table are clamped as in
+    forward. An inputs-v4 model (EXT_W1: the v3 numbers and slots through w1, the ext ones through
+    w1_ext) folds the same way into one W_num and per-slot rows.
+
+    NOT bit-identical to forward: the folding is done in float64 and rounded once, and the sums run
+    in a different order, so values move by ~1e-6 and search can pick differently; bots record it
+    (`net_input: "folded"` in their config). Inputs must be finite (the encoders' are): a non-finite
+    number in a constant-in-training column would give 0 * inf here where forward feeds 0."""
+
+    def __init__(self, p: dict[str, np.ndarray], category_of_slot: list[str] = features.CATEGORY_OF_SLOT):
+        (wk, bk), = layer_keys(n_layers(p))[0][:1]
+        mean, std = p["mean"].astype(np.float64), p["std"].astype(np.float64)
+        n = len(mean)
+        w1 = p[wk].astype(np.float64)
+        widths = [p[f"emb_{cat}"].shape[1] for cat in category_of_slot]
+        if EXT_W1 in p:
+            n3, c3 = features.N_NUMERIC, features.N_CATEGORICAL
+            wx = p[EXT_W1].astype(np.float64)
+            w_num = np.vstack([w1[:n3], wx[:n - n3]])
+            at = [n3, n - n3]  # next unread row of w1, of w1_ext
+            rows = []
+            for slot, width in enumerate(widths):
+                src, k = (w1, 0) if slot < c3 else (wx, 1)
+                rows.append(src[at[k]:at[k] + width])
+                at[k] += width
+            if at != [len(w1), len(wx)]:
+                raise ValueError(f"first layer rows {len(w1)} + {len(wx)} don't match the inputs {at}")
+        else:
+            w_num, at, rows = w1[:n], n, []
+            for width in widths:
+                rows.append(w1[at:at + width])
+                at += width
+            if at != len(w1):
+                raise ValueError(f"first layer has {len(w1)} rows, the inputs {at}")
+        inv = np.where(std <= CONSTANT_STD, 0.0, 1.0 / std)
+        self.w = np.ascontiguousarray(w_num * inv[:, None], dtype=np.float32)
+        self.b = (p[bk].astype(np.float64) - (mean * inv) @ w_num).astype(np.float32)
+        # small calls: pre-multiplied tables, stacked, with each slot's offset and last id
+        tables = [p[f"emb_{cat}"].astype(np.float64) @ r for cat, r in zip(category_of_slot, rows)]
+        self.table = np.ascontiguousarray(np.vstack(tables), dtype=np.float32)
+        self.offset = np.cumsum([0] + [len(t) for t in tables[:-1]]).astype(np.int32)
+        self.last = np.array([len(t) - 1 for t in tables], np.int32)
+        # large calls: per category (its slots, its embedding table), W_emb's rows in that order
+        self.groups, w_emb = [], []
+        for cat in dict.fromkeys(category_of_slot):
+            slots = [s for s, c in enumerate(category_of_slot) if c == cat]
+            table = p[f"emb_{cat}"]
+            self.groups.append((np.array(slots), table, len(table) - 1, len(slots) * table.shape[1]))
+            w_emb += [rows[s] for s in slots]
+        self.w_emb = np.ascontiguousarray(np.vstack(w_emb), dtype=np.float32)
+        self._emb = np.empty((0, len(self.w_emb)), np.float32)  # the large calls' embedding buffer, grown
+
+    def __call__(self, nums: np.ndarray, cats: np.ndarray) -> np.ndarray:
+        n = len(nums)
+        h = nums @ self.w
+        h += self.b
+        if n <= FAST_TABLE_ROWS:
+            idx = np.minimum(cats, self.last)
+            idx += self.offset
+            h += self.table[idx].sum(axis=1)
+        else:
+            if len(self._emb) < n:
+                self._emb = np.empty((n, len(self.w_emb)), np.float32)
+            emb, at = self._emb[:n], 0
+            for slots, table, last, width in self.groups:
+                emb[:, at:at + width] = table[np.minimum(cats[:, slots], last)].reshape(n, width)
+                at += width
+            h += emb @ self.w_emb
+        return np.maximum(h, 0, out=h)
