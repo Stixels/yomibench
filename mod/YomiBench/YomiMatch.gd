@@ -1315,15 +1315,31 @@ func expand(seat, spec):
 	return {"id": c.id, "candidate": c}
 
 
-# Debug widget probe, appended to this real decision's candidate list.
+# Debug widget probe, appended to this real decision's candidate list. A probe that gives exactly a listed or expanded
+# candidate's input carries that candidate's factors and values, with `base` its root generated id, so a policy reads
+# it as that candidate; any other probe has no metadata (no candidate set builds it).
 func probe(seat, spec):
 	var r = gens[seat].probe(spec)
 	if r.has("error"):
 		return r
 	var c = r.candidate
+	var key = JSON.print([c.action, c.data, c.extra])
+	for o in cands[seat]:
+		if o.has("values") and JSON.print([o.action, o.data, o.extra]) == key:
+			c["factors"] = o.factors.duplicate(true)
+			c["values"] = o.values.duplicate(true)
+			c["base"] = o.id if o.get("base") == null else o.base
+			break
 	c["id"] = cands[seat].size()
 	cands[seat].append(c)
 	return {"id": c.id, "candidate": c}
+
+
+# Debug: the extra-panel widget clicks behind extra_set k of a candidate's move (Candidates.extra_set_widgets).
+func extra_set_widgets(seat, base, k):
+	if not gens[seat].has_method("extra_set_widgets"):
+		return {"error": "this seat's candidate set has no extra sets"}
+	return gens[seat].extra_set_widgets(base, k)
 
 
 # Set 7 L1: the seat's toggle pool (Candidates.toggle_pool).

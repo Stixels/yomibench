@@ -561,6 +561,20 @@ func _handle_line(line, cmd_out):
 					p.erase(key)
 			out.append(match_.probe(int(p.seat), p))
 		return {"results": out}
+	if cmd == "extra_set_widgets":
+		# Debug (live compare): the panel clicks behind a candidate's extra_set value, as probe takes them.
+		var seat = msg.get("seat")
+		var base = msg.get("candidate")
+		var k = msg.get("extra_set")
+		for v in [seat, base, k]:
+			if not (typeof(v) in [TYPE_INT, TYPE_REAL]) or int(v) != v or v < 0:
+				return _err("bad_request", "extra_set_widgets needs seat, candidate and extra_set")
+		if not seat in [0, 1]:
+			return _err("bad_request", "seat must be 0 or 1")
+		var esw = match_.extra_set_widgets(int(seat), int(base), int(k))
+		if esw.has("error"):
+			return _err("bad_request", esw.error)
+		return esw
 	if cmd == "toggle_pool":
 		# Set 7 L1: one seat's toggle pool (Candidates.toggle_pool), the values expand takes for each listed move.
 		var seat = msg.get("seat")

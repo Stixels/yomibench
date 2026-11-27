@@ -1456,6 +1456,11 @@ func _describe_widget(w):
 # slider/count a number, check/toggle/height a bool, option an item index.
 # Returns {"candidate": {action, data, extra}} or {"error": message}.
 func probe(spec):
+	# Purity: a probe starts from fresh widgets, as generate() and expand() do, so earlier probes, previews and expands
+	# leave nothing behind in the panel (Robot's FlyDir memory, a Mutant juke left pressed). The fresh panel shows the
+	# JukeDir rows the turn-open panel left (the real panel hides rows a frame late), as the panel a probe read before.
+	_new_epoch()
+	_set_turn_sections()
 	_activate_extra()
 	var saved_extra = _save_extra()
 	var res = _probe(spec)
@@ -1539,6 +1544,8 @@ func _probe(spec):
 		var p = Vector2(float(v.get("x", 0)), float(v.get("y", 0))).limit_length(1.0) * dn.panel_radius
 		dn.update_value(p, false, v.get("snap", false) != true)
 		di = dn.get_data()
+		if (di.x != 0 or di.y != 0) and not fighter.di_enabled:
+			return {"error": "DI is disabled"}  # as step_raw refuses it (YomiMatch._raw_input)
 	var extra = {"DI": di, "reverse": reverse, "feint": feint, "prediction": int(spec.get("prediction", -1))}
 	if extra_node:
 		extra.merge(extra_node.get_extra())
@@ -2083,6 +2090,37 @@ func _switch_slots(state):
 			out.append(s)
 	switch_slots[name] = out
 	return out
+
+
+# Debug (live compare): the extra-panel widget settings behind extra_set k of candidate base_id's move, in the order
+# they are applied, as probe takes them ([[widget index, value], ...]): a Draw pair's two sets in order, a panel set or
+# pool triple combined (toggles first), a switch set as it is. {"widgets": [...]} or {"error": why}.
+func extra_set_widgets(base_id, k):
+	if not recipes.has(base_id):
+		return {"error": "candidate %s was not generated or expanded this decision" % str(base_id)}
+	var state = recipes[base_id].state
+	var sets = _sets_for(state)
+	var s
+	if k < sets.size():
+		s = sets[k]
+	else:
+		var layer = _layer_slot(state, k)
+		if layer == null:
+			return {"error": "extra_set %d out of range" % k}
+		if layer[0] == "switch":
+			s = layer[1]
+		elif layer[0] == "pair":
+			var out = []
+			for u in layer[1]:
+				for ei in sets[u]:
+					out.append([int(ei), sets[u][ei]])
+			return {"widgets": out}
+		else:
+			s = _combine(sets, layer[1], _widget_kinds())
+	var out = []
+	for ei in s:
+		out.append([int(ei), s[ei]])
+	return {"widgets": out}
 
 
 # A switch set's extras: the fresh panel's with the set made (as _fresh_apply), or as set 4 applies it.
