@@ -269,3 +269,21 @@ def test_qol_prefs_random_swap_tooltips_and_replay_hide():
     assert "Extracting the bot server (%d/%d)..." in _func(vsbot, "func _bundled_server():")
     assert "Preparing the bot's copy of the game (%s)..." in _func(vsbot, "func _client_run_dir():")
     assert "const LOG_MAX_BYTES = 1048576" in vsbot and 'LOG_PATH + ".old"' in _func(vsbot, "func _log(text):")
+
+
+def test_match_start_payload_and_host_crash_diagnostics():
+    human = HUMAN.read_text()
+    vsbot = (MOD / "VsBot.gd").read_text()
+    launch = _func(human, "func _launch(msg):")
+    # Match vanilla CharacterSelect.get_match_data() so mods reading selected_styles don't trip on a missing key
+    assert 'data["selected_styles"] = {1: null, 2: null}' in launch
+    # Host match-start breadcrumbs: distinguish crashes before/during _on_match_ready vs setup_game_deferred vs tick 0
+    assert 'link.trace("starting match:' in launch
+    assert 'link.trace("match_ready returned")' in launch
+    assert launch.index('link.trace("starting match:') < launch.index("main._on_match_ready(data)")
+    assert launch.index("main._on_match_ready(data)") < launch.index('link.trace("match_ready returned")')
+    assert 'link.trace("match attached (tick %d)" % game.current_tick)' in _func(human, "func _attach():")
+    # Session header records GPU adapter/driver and active mod list so yomibench_vsbot.log is self-contained
+    vlaunch = _func(vsbot, "func launch():")
+    assert "_active_mod_names()" in vlaunch and "VisualServer.get_video_adapter_name()" in vlaunch
+    assert "func _active_mod_names():" in vsbot

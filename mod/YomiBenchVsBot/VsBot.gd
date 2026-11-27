@@ -127,6 +127,9 @@ func launch():
 	if not steam_owned(get_tree()):
 		_message("Multiplayer (vs bot) needs the game started through Steam, from your own copy.")
 		return false
+	var mods = _active_mod_names()
+	_log("host: %s (%s); %d active mods: %s" % [VisualServer.get_video_adapter_name(),
+		OS.get_video_driver_name(OS.get_current_video_driver()), mods.size(), PoolStringArray(mods).join(", ")])
 	# The panel first, then the slow part on a thread: the first time, extracting the bundled server (about 57 MB, each
 	# file's sha256 checked) and copying the game's files for the bot's copy. On the main thread that froze the game
 	# for seconds (a minute on a slow disk with antivirus scanning each new file), long enough for Windows to call it
@@ -803,6 +806,21 @@ func _free_port():
 			probe.stop()
 			return p
 	return 7999
+
+
+func _active_mod_names():
+	var names = []
+	var ml = get_tree().root.get_node_or_null("ModLoader")
+	if ml != null and typeof(ml.get("active_mods")) == TYPE_ARRAY:
+		for item in ml.active_mods:
+			if typeof(item) == TYPE_ARRAY:
+				for e in item:
+					if typeof(e) == TYPE_DICTIONARY:
+						var n = str(e.get("friendly_name", e.get("name", "")))
+						if n != "":
+							names.append(n)
+						break
+	return names
 
 
 # One line per event in user://yomibench_vsbot.log (the game's stdout is buffered when redirected).
