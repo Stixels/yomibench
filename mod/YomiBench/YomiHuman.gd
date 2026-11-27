@@ -554,6 +554,7 @@ func _launch(msg):
 	var data = match_settings.duplicate(true)
 	data["singleplayer"] = side == "single"
 	data["selected_characters"] = {1: {"name": msg.p1}, 2: {"name": msg.p2}}
+	data["selected_styles"] = {1: null, 2: null}
 	data["seed"] = int(msg.seed)
 	if side != "single":  # as the game's rematch resets them (Network.send_rematch_request)
 		Network.forfeiter = 0
@@ -600,7 +601,12 @@ func _launch(msg):
 		card.hide()
 	if reveal_btn:
 		reveal_btn.hide()
+	if side == "host" and link != null:
+		link.trace("starting match: %s vs %s (seed %s, timer %s)" % [
+			msg.p1, msg.p2, str(msg.seed), str(data.get("timer_mode", "none"))])
 	main._on_match_ready(data)
+	if side == "host" and link != null:
+		link.trace("match_ready returned")
 
 
 # The standard settings with a preset's overrides, each in the type the game's own setting has
@@ -718,6 +724,8 @@ func _attach():
 		var chat = main.get_node_or_null("%ChatWindow")
 		if chat:
 			chat.hide()
+		if link != null:
+			link.trace("match attached (tick %d)" % game.current_tick)
 		phase = "playing"
 		return
 	game.connect("game_ended", self, "_on_game_ended")
