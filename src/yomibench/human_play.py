@@ -28,7 +28,7 @@ it, its best-so-far mix is played, and production's quick turn only if the full 
 by an emergency point (yomibench.anytime). The timer settings are the game's clock, not the
 simulation: they are never sent to the sim.
 
-Each decision's log line says what produced the bot's move (`bot.path`: full, partial-full, quick or
+Each decision's log line says what produced the bot's move (`bot.path`: full, partial-full, floor, quick or
 continue), with its think time and the clock it left (`bot.clock`); the result line counts the paths.
 
 Think until lock-in (option `think_until_lockin`, default on; the panel's "Bot uses your thinking time"): the bot
@@ -117,7 +117,7 @@ PICK_STYLES = ("mixed", "strongest")
 # "Bot CPU use" (the panel's; option `cpu`): the bot shares the player's PC with the game they are playing. light
 # (default) runs the server at BelowNormal, so the game and the player's other programs come first; full runs it at
 # Normal, which helps only when other programs keep the PC busy. The search is one thread either way, and the app
-# caps the math libraries at 2 threads (more gave the value net no speed).
+# caps the math libraries at 1 thread (more gave the value net no speed).
 CPU_USES = ("light", "full")
 PRIORITY_CLASS = {"light": 0x00004000, "full": 0x00000020}  # BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS
 
@@ -948,7 +948,12 @@ class Session:
         return rate is None or rate < anytime.FLOOR_RATE
 
     def note_preview_rate(self, trace: list[dict[str, Any]]) -> None:
+        """Adds the decision's quick (0) and full (1) search stages to `preview_work`: their time is mostly
+        previews and value batches. The deeper stages' time goes largely to branch continues, which would pull a
+        fast PC's rate under the floor's threshold."""
         for t in trace:
+            if t.get("stage") not in (0, 1):
+                continue
             n = int(t.get("work", {}).get("previews", 0))
             if n > 0:
                 self.preview_work[0] += n

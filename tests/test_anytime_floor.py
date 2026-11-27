@@ -189,8 +189,28 @@ def test_auto_floor_follows_the_measured_preview_rate():
     assert fast.use_floor() is False
     assert _session("on", (6000, 10.0)).use_floor() is True and _session("off").use_floor() is False
     s = _session()
-    s.note_preview_rate([{"ms": 500.0, "work": {"previews": 400}}, {"ms": 10.0, "work": {"previews": 0}}])
+    s.note_preview_rate([{"stage": 1, "ms": 500.0, "work": {"previews": 400}},
+                         {"stage": 1, "ms": 10.0, "work": {"previews": 0}}])
     assert s.preview_work == [400, 0.5] and s.use_floor() is False  # 800/s
+
+
+def test_auto_floor_rate_ignores_the_deep_stages():
+    """Thinking until lock-in: two-decision stages spend their time on branch continues, not previews. A fast PC's
+    rate is its quick and full searches' alone, so the deep stages never pull it under the threshold."""
+    s = _session()
+    s.note_preview_rate([
+        {"stage": 0, "ms": 200.0, "work": {"previews": 150, "continues": 0}},   # the floor
+        {"stage": 1, "ms": 800.0, "work": {"previews": 450, "continues": 0}},   # the full search: 600/s together
+        {"stage": 2, "ms": 3000.0, "work": {"previews": 120, "continues": 0}},  # widen
+        {"stage": 3, "ms": 9000.0, "work": {"previews": 40, "continues": 300}},  # two-decision, cut by a lock-in
+        {"stage": 4, "ms": 6000.0, "stopped": "lock-in", "work": {"previews": 10, "continues": 200}},
+    ])
+    assert s.preview_work == [600, 1.0] and s.preview_rate() == 600.0 and s.use_floor() is False
+    blended = (600 + 120 + 40 + 10) / 19.0  # what counting every stage would say: ~40/s, a "slow" PC
+    assert blended < anytime.FLOOR_RATE
+    cut = _session()
+    cut.note_preview_rate([{"stage": 1, "ms": 2000.0, "stopped": "deadline", "work": {"previews": 90}}])
+    assert cut.preview_work == [90, 2.0]  # a cut full search still counts: it measured this PC
 
 
 def test_session_refuses_an_unknown_floor():
