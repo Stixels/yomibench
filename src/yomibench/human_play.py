@@ -114,6 +114,29 @@ GEN = re.compile(r"^gen-(\d+)$")
 # samples it (the equilibrium play: unpredictable, so it can't be read and punished), "strongest" plays its most
 # likely move, except Burst against Continue/DI (BURST_ACTIONS; pick_index).
 PICK_STYLES = ("mixed", "strongest")
+# "Bot CPU use" (the panel's; option `cpu`): the bot shares the player's PC with the game they are playing. light
+# (default) runs the server at BelowNormal, so the game and the player's other programs come first; full runs it at
+# Normal, which helps only when other programs keep the PC busy. The search is one thread either way, and the app
+# caps the math libraries at 2 threads (more gave the value net no speed).
+CPU_USES = ("light", "full")
+PRIORITY_CLASS = {"light": 0x00004000, "full": 0x00000020}  # BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS
+
+
+def set_cpu_use(use: str) -> bool:
+    """This process (the bot server) at `use`'s priority class (CPU_USES). Windows only (elsewhere False); never
+    raises: the bot plays either way."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        return bool(k32.SetPriorityClass(k32.GetCurrentProcess(), PRIORITY_CLASS[use]))
+    except Exception:  # noqa: BLE001
+        return False
+
 # The defensive bursts (the game's Burst out of hitstun, as candidates name it). In a simultaneous game Burst against
 # Continue/DI is a mixed choice at equilibrium (a predictable Burst gets parried), so "strongest" never takes the
 # argmax between them: with any weight on Burst it plays Burst with exactly its equilibrium probability. Argmax
@@ -474,6 +497,7 @@ class Session:
                  schedule: list[tuple[str, str, int]] | None = None, mode: str = "human", scene: str | None = None,
                  model: dict[str, Any] | None = None, pick: str = "mixed", show_estimate: bool = False,
                  settings: str = "standard", think_until_lockin: bool = True, turn_timer: bool | None = None,
+                 cpu: str = "light",
                  think_cap: float = anytime.THINK_CAP_S, lock_cap: float = anytime.LOCK_CAP_S,
                  bank_reserve: float = anytime.BANK_RESERVE_S,
                  bank_deep_turns: float = anytime.BANK_DEEP_TURNS,
@@ -546,7 +570,7 @@ class Session:
         if settings in self.presets_refused:
             raise ValueError(f"this sim can't play the {settings} settings: {self.presets_refused[settings]}")
         self.options = self._options({"pick": pick, "show_estimate": show_estimate, "settings": settings,
-                                      "think_until_lockin": think_until_lockin,
+                                      "think_until_lockin": think_until_lockin, "cpu": cpu,
                                       # the panel's "Turn timer" default; unset: on for a preset with a timer (ranked)
                                       **({} if turn_timer is None else {"turn_timer": bool(turn_timer)})})
         self.schedule = list(schedule or [])  # autoplay: (p1, p2, seed) games the mod starts in order
@@ -651,6 +675,9 @@ class Session:
                     raise ValueError(f"pick style must be one of {', '.join(PICK_STYLES)}, not {v!r}")
             elif k in ("show_estimate", "think_until_lockin", "turn_timer"):
                 v = bool(v)
+            elif k == "cpu":
+                if v not in CPU_USES:
+                    raise ValueError(f"bot CPU use must be one of {', '.join(CPU_USES)}, not {v!r}")
             elif k == "settings":
                 if v not in self.presets:
                     raise ValueError(f"settings preset must be one of {', '.join(self.presets)}, not {v!r}")
@@ -674,6 +701,7 @@ class Session:
             if c not in self.characters:
                 raise ValueError(f"the bots play {', '.join(self.characters)}, not {c!r}")
         options = self._options(msg.get("options"), self.options)
+        set_cpu_use(options.get("cpu", "light"))
         settings = msg.get("settings") or {}
         if not isinstance(settings, dict):
             raise ValueError("settings must be an object")
@@ -1259,6 +1287,9 @@ def add_play_args(ap: argparse.ArgumentParser) -> None:
                          "the settings production trains on) or standard (the online lobby default) (changeable on the panel)")
     ap.add_argument("--show-estimate", action="store_true",
                     help="show the bot's win estimate in the bottom bar after each turn (changeable on the panel)")
+    ap.add_argument("--cpu", choices=CPU_USES, default="light",
+                    help="bot CPU use: light (default) runs the bot below normal priority, so the game comes first; "
+                         "full at normal priority (changeable on the panel)")
     ap.add_argument("--deadline-margin", type=float, default=anytime.DEADLINE_MARGIN_S,
                     help="with a turn timer, answer at least this many seconds before it runs out "
                          f"(default {anytime.DEADLINE_MARGIN_S:g})")

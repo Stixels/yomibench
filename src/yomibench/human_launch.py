@@ -157,6 +157,7 @@ def session_kwargs(args, bot) -> dict:
     """Session keyword arguments from a launcher's play flags (human_play.add_play_args) and its bot."""
     return dict(label=bot.label, model=bot.model, pick=args.pick, show_estimate=args.show_estimate,
                 settings=args.settings, think_until_lockin=args.think_until_lockin,
+                cpu=getattr(args, "cpu", "light"),
                 think_cap=getattr(args, "think_cap", THINK_CAP_S),
                 lock_cap=getattr(args, "lock_cap", LOCK_CAP_S),
                 bank_reserve=getattr(args, "bank_reserve", BANK_RESERVE_S),

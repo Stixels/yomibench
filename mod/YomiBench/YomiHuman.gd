@@ -59,7 +59,7 @@ extends Node
 # `link` is the node that carries messages between the two (VsBot.gd / MpClient.gd).
 
 const PROTOCOL = 1
-const VERSION = "11"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message; 9: locked_in in every match (the untimed after-lock cap), the bot's status, forfeit results, the result card; 10: the net's short sha256 in the bottom bar; 11: the bot's clock in each decision (the ranked bank)
+const VERSION = "12"  # 2: characters from the server's hello (all five), pick style, win estimate; 3: settings presets; 4: think until lock-in; 5: deadline in every mode; 6: multiplayer sides; 7: turn timer toggle, the game's timer in single; 8: the bot-crashed message; 9: locked_in in every match (the untimed after-lock cap), the bot's status, forfeit results, the result card; 10: the net's short sha256 in the bottom bar; 11: the bot's clock in each decision (the ranked bank); 12: "Bot CPU use" (option cpu)
 # The characters the panel offers until the server's hello names the ones its sim plays.
 var characters = ["Ninja", "Cowboy", "Wizard", "Mutant", "Robot"]
 
@@ -119,6 +119,9 @@ var session_wins = 0
 var session_losses = 0
 var session_draws = 0
 var pick_styles = ["mixed", "strongest"]
+var cpu_uses = ["light", "full"]  # the server's CPU_USES; a server without the option has no "cpu" in its hello
+var cpu_opt = null
+var cpu_row = null
 var estimate = null      # the bot's win estimate from this decision's pick, shown once the turn is played
 var shown_estimate = null
 # Think until lock-in: the bot deepens its search until P1 locks in. The server only ever hears
@@ -424,6 +427,8 @@ func _on_hello(r):
 		timer_box.pressed = _timer_default(str(preset_names[max(0, settings_opt.selected)]))
 		# with the turn timer on the bot uses its clock: it deepens until you lock in or its deadline
 		think_box.pressed = bool(opts.get("think_until_lockin", false)) or timer_box.pressed
+		cpu_row.visible = opts.has("cpu")  # an older server has no CPU choice
+		cpu_opt.select(max(0, cpu_uses.find(str(opts.get("cpu", "light")))))
 	if not autoplay:
 		_apply_prefs()
 	_update_timer_label()
@@ -520,6 +525,8 @@ func _start_match(p1, p2, seed_):
 		timer_on = timer_box.pressed
 		options = {"pick": pick_styles[max(0, pick_opt.selected)], "show_estimate": estimate_box.pressed,
 			"settings": preset, "think_until_lockin": think_box.pressed, "turn_timer": timer_on}
+		if server.get("options", {}).has("cpu"):
+			options["cpu"] = cpu_uses[max(0, cpu_opt.selected)]
 	var think = think_box.pressed if not autoplay else bool(server.get("options", {}).get("think_until_lockin", false)) or timer_on
 	if autoplay:  # the launcher's choices, with thinking on the clock as the panel's default
 		options = {"think_until_lockin": think, "turn_timer": timer_on}
@@ -1497,6 +1504,16 @@ func _make_overlay():
 	timer_box.hint_tooltip = "Use the game's turn timer (ranked: 15-minute chess clock, 15 s floor; standard: per-turn timer)."
 	timer_box.pressed = _timer_default(str(preset_names[0]))
 	box.add_child(timer_box)
+	cpu_row = HBoxContainer.new()
+	box.add_child(cpu_row)
+	var cpu_label = Label.new()
+	cpu_label.text = "Bot CPU use:"
+	cpu_row.add_child(cpu_label)
+	cpu_opt = OptionButton.new()
+	cpu_opt.hint_tooltip = "light: the bot runs at low priority, so your game and other programs come first. full: normal priority; it only helps if other programs keep your PC busy."
+	cpu_opt.add_item("light (recommended)")  # cpu "light": BelowNormal
+	cpu_opt.add_item("full")                 # cpu "full": Normal
+	cpu_row.add_child(cpu_opt)
 	settings_opt.connect("item_selected", self, "_on_preset_selected")
 	start_btn = Button.new()
 	start_btn.text = "Start game"
@@ -1590,7 +1607,7 @@ func _make_card(theme):
 
 
 func _set_controls(on):
-	for c in [p1_opt, p2_opt, swap_btn, settings_opt, pick_opt, estimate_box, think_box, timer_box, start_btn]:
+	for c in [p1_opt, p2_opt, swap_btn, settings_opt, pick_opt, estimate_box, think_box, timer_box, cpu_opt, start_btn]:
 		if c != null:
 			c.disabled = not on
 
@@ -1749,6 +1766,7 @@ func _save_prefs():
 		"show_estimate": estimate_box.pressed,
 		"think_until_lockin": think_box.pressed,
 		"turn_timer": timer_box.pressed,
+		"cpu": cpu_uses[max(0, cpu_opt.selected)],
 	}
 	var f = File.new()
 	if f.open(PREFS, File.WRITE) == OK:
@@ -1778,6 +1796,10 @@ func _apply_prefs():
 		timer_box.pressed = p.turn_timer
 	if typeof(p.get("think_until_lockin")) == TYPE_BOOL:
 		think_box.pressed = p.think_until_lockin
+	if p.has("cpu"):
+		var cidx = cpu_uses.find(str(p.cpu))
+		if cidx >= 0:
+			cpu_opt.select(cidx)
 
 
 func _show_panel(t, i):
