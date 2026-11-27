@@ -425,6 +425,50 @@ def test_serve_retries_a_failed_server_without_stopping_the_others(tmp_path, mon
     assert all(p.killed for _, p in started)  # everything cleaned up on exit
 
 
+def test_game_server_puts_a_below_normal_game_back_once_ready(monkeypatch, tmp_path):
+    # The game raises itself to AboveNormal as it starts; GameServer(below_normal=True) lowers it after wait_ready.
+    from yomibench import game
+
+    order = []
+
+    class FakeProc:
+        pid, returncode = 4242, None
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(game, "build_run_dir", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(game, "find_game_dir", lambda *a: tmp_path)
+    monkeypatch.setattr(game, "launch", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(game, "wait_ready", lambda port, p: order.append("ready"))
+    monkeypatch.setattr(game, "set_below_normal", lambda pid: order.append(("lower", pid)))
+    game.GameServer(port=7000, below_normal=True)
+    assert order == ["ready", ("lower", 4242)]
+    order.clear()
+    game.GameServer(port=7000)
+    assert order == ["ready"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows priority classes")
+def test_set_below_normal_lowers_a_running_process():
+    import ctypes
+    import subprocess
+    from ctypes import wintypes
+
+    from yomibench import game
+
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                         creationflags=subprocess.ABOVE_NORMAL_PRIORITY_CLASS)
+    try:
+        assert game.set_below_normal(p.pid)
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetPriorityClass.argtypes = [wintypes.HANDLE]
+        assert k32.GetPriorityClass(int(p._handle)) == subprocess.BELOW_NORMAL_PRIORITY_CLASS
+    finally:
+        p.kill()
+        p.wait()
+
+
 def _swapped(m):
     return [[-m[i][j] for i in range(len(m))] for j in range(len(m[0]))]
 

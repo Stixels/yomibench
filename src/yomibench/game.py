@@ -363,6 +363,29 @@ def wait_ready(port: int, proc: subprocess.Popen[bytes] | None = None, timeout: 
     raise TimeoutError(f"game server on port {port} not ready after {timeout:.0f}s")
 
 
+def set_below_normal(pid: int) -> bool:
+    """Put process `pid` at BelowNormal priority (Windows; elsewhere a no-op returning False). The game raises itself
+    to AboveNormal as it starts, so a copy launched BelowNormal is put back once it is ready."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.SetPriorityClass.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    h = k32.OpenProcess(0x0200 | 0x0400, False, pid)  # PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION
+    if not h:
+        return False
+    try:
+        return bool(k32.SetPriorityClass(h, subprocess.BELOW_NORMAL_PRIORITY_CLASS))
+    finally:
+        k32.CloseHandle(h)
+
+
 def connect_server(port: int, owned=None, host: str = "127.0.0.1", settle: float = 10.0):
     """An Engine on a server `wait_ready` just saw, with a hello answered. The server takes one client and refuses a
     second (`busy`, then it closes the connection); wait_ready's probe connection counts until the server notices it
@@ -416,6 +439,8 @@ class GameServer:
         except Exception:
             self.close()
             raise
+        if below_normal:
+            set_below_normal(self.proc.pid)  # the game raised itself to AboveNormal as it started
 
     def close(self) -> None:
         if self.proc.poll() is None:
