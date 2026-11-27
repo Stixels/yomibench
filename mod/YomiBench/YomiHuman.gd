@@ -570,6 +570,9 @@ func _launch(msg):
 	ReplayManager.playback = false
 	ReplayManager.resimulating = false
 	ReplayManager.replaying_ingame = false
+	# Set when a match ends (the post-game replay plays in full); the game's bottom bar reads it to put both players'
+	# info and super meters in the bottom bar instead of across the top, so a second match opened with them moved.
+	ReplayManager.play_full = false
 	Global.frame_advance = false
 	main.ui_layer.reset_ui()
 	if is_instance_valid(main.game):
@@ -612,8 +615,19 @@ func _launch(msg):
 		link.trace("starting match: %s vs %s (seed %s, timer %s)" % [
 			msg.p1, msg.p2, str(msg.seed), str(data.get("timer_mode", "none"))])
 	main._on_match_ready(data)
+	_reshow_hud()
 	if side == "host" and link != null:
 		link.trace("match_ready returned")
+
+
+# After a match the HUD layer's children (health bars, names, portraits, combo counter) can stay hidden while the layer
+# itself says visible, so a second match opened without them. Hiding and showing the layer again makes its children
+# follow it. Harmless on a first match.
+func _reshow_hud():
+	var hud = main.get("hud_layer")
+	if hud is CanvasLayer:
+		hud.visible = false
+		hud.visible = true
 
 
 # The standard settings with a preset's overrides, each in the type the game's own setting has
