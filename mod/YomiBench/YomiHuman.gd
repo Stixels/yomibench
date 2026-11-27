@@ -1506,9 +1506,9 @@ func _make_overlay():
 	box.add_child(timer_box)
 	cpu_row = HBoxContainer.new()
 	box.add_child(cpu_row)
-	var l4 = Label.new()
-	l4.text = "Bot CPU use:"
-	cpu_row.add_child(l4)
+	var cpu_label = Label.new()
+	cpu_label.text = "Bot CPU use:"
+	cpu_row.add_child(cpu_label)
 	cpu_opt = OptionButton.new()
 	cpu_opt.hint_tooltip = "light: the bot runs at low priority, so your game and other programs come first. full: normal priority; it only helps if other programs keep your PC busy."
 	cpu_opt.add_item("light (recommended)")  # cpu "light": BelowNormal
