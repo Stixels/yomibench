@@ -20,6 +20,16 @@ best-so-far mix (`MatrixBot.progress`), so the answer is, by preference:
   the rest of the time.
 - `continue`: not even the quick search finished by the deadline; P2 holds (Continue).
 
+**The quick-menu floor** (`think(floor=True)`; human play turns it on for a PC whose search is slow, `FLOOR_RATE`):
+on a decision a clock can cut (a turn deadline or the after-lock cap), the quick search (as the emergency's, above)
+runs first, to the end, before the production search. It is certified (no factor refinement, so its double oracle or
+full-table fallback always certifies), and it is played (`floor`) unless the production search finishes or its
+best-so-far round is converged: an unconverged best-so-far never replaces it, so a slow PC plays a solved small menu
+instead of a 1-2 round stub of the full lists (on a slow PC the full search's first rounds can take the whole turn,
+and an unconverged round is often a single move at 100%). With a floor there is no emergency point. The floor's
+previews of base pairs are handed to the production search's cache (the same states the sim would return), so its
+answer is the plain search's.
+
 When the deadline doesn't hit, the answer is exactly the plain search's.
 
 **The after-lock cap** (no turn timer, since private build v5): the bot thinks while the human decides, and once
@@ -134,7 +144,11 @@ BANK_DEEP_TURNS = 100.0
 # makes a turn answer unsolved. On a slow PC refinement alone took most of each turn and long games bled the bank to the
 # floor (g17 audit: 9-17 floor deadlines in each 100+ turn game); a share of what is left shrinks as the bank does.
 BANK_REFINE_TURNS = 40.0
-PATHS = ("full", "partial-full", "quick", "continue")  # what produced a timed answer (human play logs it per turn)
+PATHS = ("full", "partial-full", "floor", "quick", "continue")  # what produced a timed answer (logged per turn)
+# Human play runs the quick-menu floor (module doc) while the bot's measured preview rate (previews per second of
+# search, value net included) is below this, and until it has a measurement: tens per second on a slow PC whose full
+# search stops after 1-2 rounds, hundreds on one where it converges.
+FLOOR_RATE = 150.0
 QUICK_CAP, QUICK_POLICY = 32, "options-shuffle"  # production's quick turn (self-play's cheap_cap / cheap_cap_policy)
 # With a quick policy (human_play --quick-policy): self-play's policy-picked quick menus (yomibench.quick_policy).
 QUICK_POLICY_MENU, QUICK_POLICY_CAP = "policy40+gumbel8+parryx6", 48
@@ -524,8 +538,8 @@ class Answer:
         return (self.row, self.value) if seat == 0 else (self.col, -self.value)
 
     def label(self) -> str:
-        return {"quick": "quick search", "production": "full search", "partial-full": "full search, best so far",
-                "widen": "widened"}.get(self.name, f"2-decision x{self.pairs}")
+        return {"quick": "quick search", "floor": "quick search (floor)", "production": "full search",
+                "partial-full": "full search, best so far", "widen": "widened"}.get(self.name, f"2-decision x{self.pairs}")
 
 
 def widened(bot: MatrixBot) -> MatrixBot:
@@ -560,6 +574,9 @@ class Deepener:
         # The production search's best-so-far: its latest solved double-oracle round (MatrixBot.progress).
         self.partial: Answer | None = None
         self.partial_rounds = 0
+        # The quick-menu floor (module doc), once it has finished; None: off or not finished.
+        self.floor: Answer | None = None
+        self._quick_cache: dict[str, Any] = {}  # the last quick search's private turn cache
         # A bot's search key holds id(value): keep every stage's evaluator alive for the decision,
         # so no later stage's evaluator can reuse an id and meet an earlier stage's cached search.
         self.keep: list[Any] = []
@@ -588,6 +605,10 @@ class Deepener:
         point): production's quick turn: each seat's candidates capped at QUICK_CAP (QUICK_POLICY),
         no factor refinement, searched in a private turn cache so nothing of it reaches the
         production search's lists or previews."""
+        return self._quick_search("quick")
+
+    def _quick_search(self, name: str) -> Answer:
+        """The quick turn's search (`quick`), named `name`: the emergency's or the floor's (`run_floor`)."""
         check = self.clock.check_hard
         b = self.bot.cheap()
         b.value = GuardedValue(self.bot.value, check, VALUE_CHUNK, self.clock.work, step=self.clock.note_step)
@@ -615,7 +636,30 @@ class Deepener:
         info = {**dict(private.get("oracle") or {}), "cap": cap, "cap_policy": cap_policy}
         if qp is not None:
             info["quick_policy"] = qp.sha256
-        return Answer(0, "quick", lists, row, col, value, info=info)
+        self._quick_cache = private
+        return Answer(0, name, lists, row, col, value, info=info)
+
+    def run_floor(self) -> Answer:
+        """The quick-menu floor (module doc): the quick search, then its previews of base x base pairs copied into
+        the shared turn cache, keyed as the production search looks them up (positions in the full lists). A
+        preview is the sim's next state for a pair from this position, so the production search finds the same
+        states it would have previewed itself: only fewer sim calls."""
+        ans = self._quick_search("floor")
+        private = self._quick_cache
+        pc, done = private.get("candidates"), private.get("previewed") or {}
+        if pc and done:
+            full = turn_candidates(self.obs, self.engine)
+            pos = [{c.id: k for k, c in enumerate(full[s])} for s in (0, 1)]
+            previewed = self.engine.turn_cache.setdefault("previewed", {})
+            shared = 0
+            for (i, j), st in done.items():
+                a, b = pos[0].get(pc[0][i].id), pos[1].get(pc[1][j].id)
+                if a is not None and b is not None and (a, b) not in previewed:
+                    previewed[(a, b)] = st
+                    shared += 1
+            ans.info["shared_previews"] = shared
+        self.floor = ans
+        return ans
 
     # --- stages 1 and 2: the matrix bot's own search -----------------------------------------
 
@@ -638,7 +682,7 @@ class Deepener:
         def check() -> None:
             self.clock.check_hard()
             at = self.clock.emergency()
-            if at is not None and self.partial is None and time.monotonic() >= at:
+            if at is not None and self.partial is None and self.floor is None and time.monotonic() >= at:
                 raise Stopped("emergency")
             if self.clock.refine_over():
                 raise Stopped("refine-share")
@@ -921,19 +965,33 @@ def run(stages: list[Stage], clock: Clock) -> Outcome:
 
 
 def think(bot: MatrixBot, obs: Observation, seat: int, engine: Engine, clock: Clock, *, deep: bool = True,
-          quick_policy: Any = None) -> Outcome:
+          quick_policy: Any = None, floor: bool = False) -> Outcome:
     """`bot`'s answer for `seat`: production's search, then, with `deep`, deeper stages until the clock
     stops it or every stage is done. If a hard stop cuts the production search (a turn timer's deadline),
     its best-so-far round is played (`partial-full`). With nothing solved by the clock's `emergency_at`, the
     quick search gets the time left until the deadline (`quick`); if even that is cut, nothing (`continue`).
-    `quick_policy` (a pinned yomibench.quick_policy.QuickPolicy, or None: off) as the module doc says."""
+    `quick_policy` (a pinned yomibench.quick_policy.QuickPolicy, or None: off) as the module doc says. With
+    `floor`, on a decision the clock can cut, the quick-menu floor first (module doc): played (`floor`) when the
+    production search neither finished nor has a converged best-so-far."""
     d = Deepener(bot, obs, seat, engine, clock, quick_policy=quick_policy)
+    trace: list[dict[str, Any]] = []
+    if floor and (clock.hard_at is not None or clock.lock_cap is not None):
+        f = run([(0, lambda _b: d.run_floor(), False)], clock)
+        trace = f.trace
+        if f.best is None:  # a hard stop cut the floor: the production search would not start either
+            out = Outcome(None, f.stopped, trace, None, "continue")
+            return out
     out = run(d.stages(deep=deep), clock)
+    out.trace = trace + out.trace
     if out.best is not None:
         return out  # full: the production search finished (and maybe deeper stages after it)
-    if d.partial is not None:
+    if d.partial is not None and (d.floor is None or d.partial.info.get("converged")):
         d.partial.info["rounds_seen"] = d.partial_rounds
         out.best, out.path = d.partial, "partial-full"
+        return out
+    if d.floor is not None:  # only a converged round replaces the floor: never a 1-2 round stub
+        d.floor.info["rounds_seen"] = d.partial_rounds
+        out.best, out.path = d.floor, "floor"
         return out
     if out.stopped != "emergency":  # cut (deadline, superseded) before the emergency point: nothing to play
         out.path = "continue"

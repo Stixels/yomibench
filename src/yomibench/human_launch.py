@@ -166,5 +166,6 @@ def session_kwargs(args, bot) -> dict:
                 bank_refine_turns=getattr(args, "bank_refine_turns", BANK_REFINE_TURNS),
                 turn_timer=turn_timer_arg(args),
                 deadline_margin=args.deadline_margin, deadline_fraction=args.deadline_fraction,
-                engine_spec=getattr(args, "engine", None), quick_policy=load_quick_policy(args))
+                engine_spec=getattr(args, "engine", None), quick_policy=load_quick_policy(args),
+                floor=getattr(args, "floor", "auto"))
 
