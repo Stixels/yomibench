@@ -83,11 +83,12 @@ func _phase(name):
 
 
 func start(p1_name, p2_name, seed_, max_candidates, settings, copy_mode_, divergence_log_, div_, sets_ = null, set5_ = {},
-		set6_ = {}):
+		set6_ = {}, set7_ = {}):
 	if sets_ != null:
 		candidate_sets = sets_
 	set5 = set5_
 	set6 = set6_
+	set7 = set7_
 	characters = [p1_name, p2_name]
 	copy_mode = copy_mode_
 	div = div_
@@ -133,9 +134,12 @@ func _new_game():
 var candidate_sets = ["4", "4"]
 var set5 = {}            # set 5's switches (YomiServer --yomi-set5)
 var set6 = {}            # set 6's switches (YomiServer --yomi-set6), for set-6 seats
+var set7 = {}            # set 7's: set 6's with YomiServer.SET7_KEYS on, for set-7 seats
 var characters = ["", ""]
-# Set 6 is set 5's generator with its panel-set layer on (Candidates.gd LAYERS); a later set adds a layer there.
-const GENERATORS = {"6": "/Candidates.gd", "5": "/Candidates.gd", "4": "/Candidates4.gd", "2": "/Candidates2.gd"}
+# Set 6 is set 5's generator with its panel-set layer on (Candidates.gd LAYERS); set 7 is set 6 with its switches outside
+# the 16 on (Candidates.gd POOL_LAYERS, L2, L3).
+const GENERATORS = {"7": "/Candidates.gd", "6": "/Candidates.gd", "5": "/Candidates.gd", "4": "/Candidates4.gd",
+	"2": "/Candidates2.gd"}
 # Legality (Legality.gd; YomiServer --yomi-legality, --yomi-legality-check): set before start().
 var legality_mode = "copy"
 var legality_check = ""
@@ -154,8 +158,9 @@ func _make_gens(g, max_candidates):
 		var c = load(dir + GENERATORS[candidate_sets[i]]).new()
 		add_child(c)
 		# Set 2 keeps the budget it was played with (30); the match's budget is set 4's and 5's.
-		if candidate_sets[i] in ["5", "6"]:
-			c.setup(p, max_candidates, set5, characters[i], g, set6 if candidate_sets[i] == "6" else {})
+		if candidate_sets[i] in ["5", "6", "7"]:
+			var s6 = {"5": {}, "6": set6, "7": set7}[candidate_sets[i]]
+			c.setup(p, max_candidates, set5, characters[i], g, s6)
 		else:
 			c.setup(p, 30 if candidate_sets[i] == "2" else max_candidates)
 		c.legality = legality
@@ -1310,15 +1315,38 @@ func expand(seat, spec):
 	return {"id": c.id, "candidate": c}
 
 
-# Debug widget probe, appended to this real decision's candidate list.
+# Debug widget probe, appended to this real decision's candidate list. A probe that gives exactly a listed or expanded
+# candidate's input carries that candidate's factors and values, with `base` its root generated id, so a policy reads
+# it as that candidate; any other probe has no metadata (no candidate set builds it).
 func probe(seat, spec):
 	var r = gens[seat].probe(spec)
 	if r.has("error"):
 		return r
 	var c = r.candidate
+	var key = JSON.print([c.action, c.data, c.extra])
+	for o in cands[seat]:
+		if o.has("values") and JSON.print([o.action, o.data, o.extra]) == key:
+			c["factors"] = o.factors.duplicate(true)
+			c["values"] = o.values.duplicate(true)
+			c["base"] = o.id if o.get("base") == null else o.base
+			break
 	c["id"] = cands[seat].size()
 	cands[seat].append(c)
 	return {"id": c.id, "candidate": c}
+
+
+# Debug: the extra-panel widget clicks behind extra_set k of a candidate's move (Candidates.extra_set_widgets).
+func extra_set_widgets(seat, base, k):
+	if not gens[seat].has_method("extra_set_widgets"):
+		return {"error": "this seat's candidate set has no extra sets"}
+	return gens[seat].extra_set_widgets(base, k)
+
+
+# Set 7 L1: the seat's toggle pool (Candidates.toggle_pool).
+func toggle_pool(seat):
+	if not gens[seat].has_method("toggle_pool"):
+		return {"error": "toggle_pool needs candidate set 6 for this seat"}
+	return gens[seat].toggle_pool()
 
 
 # Debug: copy the real match into the preview game and list every script variable that still
