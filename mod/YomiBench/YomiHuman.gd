@@ -615,14 +615,13 @@ func _launch(msg):
 		link.trace("starting match: %s vs %s (seed %s, timer %s)" % [
 			msg.p1, msg.p2, str(msg.seed), str(data.get("timer_mode", "none"))])
 	main._on_match_ready(data)
-	_reshow_hud()
 	if side == "host" and link != null:
 		link.trace("match_ready returned")
 
 
 # After a match the HUD layer's children (health bars, names, portraits, combo counter) can stay hidden while the layer
-# itself says visible, so a second match opened without them. Hiding and showing the layer again makes its children
-# follow it. Harmless on a first match.
+# itself says visible, so a second match opened without them. Hiding and showing the layer again, once the match has
+# started (_attach), makes its children follow it. Harmless on a first match.
 func _reshow_hud():
 	var hud = main.get("hud_layer")
 	if hud is CanvasLayer:
@@ -734,6 +733,7 @@ func _attach():
 	if not is_instance_valid(main) or not is_instance_valid(main.game) or not main.game.game_started:
 		return
 	game = main.game
+	_reshow_hud()  # here, not in _launch: the game's deferred setup hides them again after _on_match_ready
 	p1_panel = main.get_node("%P1ActionButtons")
 	p2_panel = main.get_node("%P2ActionButtons")
 	if side == "host":  # P2's moves come from the other game, through the game's own protocol
